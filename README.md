@@ -117,13 +117,32 @@ Ensure `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin` on Windows) is in your syst
 
 ## Launching TerminalVision
 
+TerminalVision is a native terminal file manager.
+
 ```bash
 # Launch in the current working directory
-TerminalVision
+terminalvision
+# or
+terminalvision .
 
 # Launch starting in a specific directory
-TerminalVision /path/to/directory
+terminalvision ~/Documents
+terminalvision /tmp
+terminalvision C:\Projects
+
+# Launch targeting a specific file (opens parent directory and selects the file)
+terminalvision src/main.rs
+
+# Display help or version
+terminalvision --help
+terminalvision --version
 ```
+
+### Startup Path Behavior:
+- **No arguments / `.`**: Opens the shell's current working directory.
+- **Directory Path**: Opens the specified directory in both panes. Tilde expansion (`~` or `~/...`) is supported on Unix-like systems.
+- **File Path**: Opens the file's parent directory and automatically places selection on the targeted file. Does **not** execute the file.
+- **Missing or Inaccessible Path**: Reports a clean, human-readable startup error and exits safely without corrupting the terminal.
 
 ---
 

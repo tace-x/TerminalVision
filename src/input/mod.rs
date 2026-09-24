@@ -38,6 +38,12 @@ pub enum InputEvent {
     ModalMoveCursorLeft,
     /// Move cursor right in an input dialog.
     ModalMoveCursorRight,
+    /// Move cursor to the start of the input field.
+    ModalMoveCursorHome,
+    /// Move cursor to the end of the input field.
+    ModalMoveCursorEnd,
+    /// Delete character at cursor in an input dialog.
+    ModalDelete,
     /// Navigate up in a modal list (e.g. command palette).
     ModalNavigateUp,
     /// Navigate down in a modal list (e.g. command palette).

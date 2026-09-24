@@ -125,6 +125,8 @@ pub struct Tab {
     history: Vec<PathBuf>,
     /// Index into `history` that `current_path` corresponds to.
     history_index: usize,
+    /// Whether hidden files are shown in this tab.
+    show_hidden: bool,
 }
 
 impl Tab {
@@ -152,6 +154,7 @@ impl Tab {
             project_info,
             history,
             history_index: 0,
+            show_hidden: false,
         };
         tab.replace_entries(entries, 0);
         tab
@@ -583,13 +586,26 @@ impl Tab {
         }
     }
 
+    /// Whether hidden files are shown in this tab.
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// Toggles showing hidden files in this tab.
+    pub fn toggle_hidden(&mut self, visible_rows: usize) {
+        self.show_hidden = !self.show_hidden;
+        let selected = self.selected_path();
+        self.search.refilter(&self.entries, self.show_hidden);
+        self.reselect_or_first(selected.as_deref(), visible_rows);
+    }
+
     /// Stores a new listing and works out again which of its entries are shown.
     fn set_entries(&mut self, entries: Vec<Entry>) {
         self.entries = entries;
         if self.search.shows_results() {
             self.search.forget_results();
         }
-        self.search.refilter(&self.entries);
+        self.search.refilter(&self.entries, self.show_hidden);
     }
 
     /// Brings the selection and the scroll offset back into range.
@@ -607,20 +623,20 @@ impl Tab {
         self.sort_mode = self.sort_mode.next();
         let selected = self.selected_path();
         sort_entries(&mut self.entries, &mut [], self.sort_mode);
-        self.search.refilter(&self.entries);
+        self.search.refilter(&self.entries, self.show_hidden);
         self.reselect(selected.as_deref(), visible_rows);
     }
 
     /// Looks among the entries this tab already holds for `query`.
     fn set_search_query(&mut self, query: &str, visible_rows: usize) {
         let selected = self.selected_path();
-        self.search.update(query, &self.entries);
+        self.search.update(query, &self.entries, self.show_hidden);
         self.reselect_or_first(selected.as_deref(), visible_rows);
     }
 
     /// Sets the mode of this tab's search.
     fn set_search_mode(&mut self, mode: SearchMode, visible_rows: usize) {
-        self.search.set_mode(mode, &self.entries);
+        self.search.set_mode(mode, &self.entries, self.show_hidden);
         let selected = self.selected_path();
         self.reselect_or_first(selected.as_deref(), visible_rows);
     }
@@ -628,7 +644,7 @@ impl Tab {
     /// Runs the search this tab is set to, for `query`.
     fn run_search(&mut self, query: &str, filesystem: &FilesystemService, visible_rows: usize) {
         let selected = self.selected_path();
-        self.search.update(query, &self.entries);
+        self.search.update(query, &self.entries, self.show_hidden);
         if !self.search.shows_results() {
             self.reselect_or_first(selected.as_deref(), visible_rows);
             return;
@@ -651,7 +667,7 @@ impl Tab {
     fn clear_search(&mut self, visible_rows: usize) {
         let selected = self.selected_path();
         self.search.clear();
-        self.search.refilter(&self.entries);
+        self.search.refilter(&self.entries, self.show_hidden);
         self.reselect_or_first(selected.as_deref(), visible_rows);
     }
 
@@ -1012,6 +1028,17 @@ impl Pane {
     pub fn change_sort(&mut self) {
         let rows = self.visible_rows;
         self.active_tab_mut().change_sort(rows);
+    }
+
+    /// Whether hidden files are shown in the active tab.
+    pub fn show_hidden(&self) -> bool {
+        self.active_tab().show_hidden()
+    }
+
+    /// Toggles showing hidden files in the active tab.
+    pub fn toggle_hidden(&mut self) {
+        let rows = self.visible_rows;
+        self.active_tab_mut().toggle_hidden(rows);
     }
 
     /// Looks among the entries the active tab holds for `query`.
@@ -1479,39 +1506,31 @@ impl SearchState {
     }
 
     /// Looks at the listing again for `query`.
-    ///
-    /// A basic or fuzzy search matches against the pane's own order, so the
-    /// matches come out in that order and the listing looks exactly as it did.
-    /// A recursive search is driven by a walk, so a new query means what the
-    /// last walk found no longer answers it: those results are forgotten rather
-    /// than left behind looking like the answer to the new query.
-    fn update(&mut self, query: &str, entries: &[Entry]) {
+    fn update(&mut self, query: &str, entries: &[Entry], show_hidden: bool) {
         self.query = query.to_string();
 
         if self.shows_results() {
             self.forget_results();
         }
 
-        self.refilter(entries);
+        self.refilter(entries, show_hidden);
     }
 
     /// Recomputes the matches from `entries` and the stored query.
-    ///
-    /// The listing is scanned once, in the order it is held in, so the matches
-    /// come out in that order whatever the query selects. Only the matches are
-    /// touched, so a caller that reorders the listing, or that changes the
-    /// order the pane shows it in, keeps whatever a walk found.
-    ///
-    /// The question is prepared once for the whole listing rather than once per
-    /// entry, so filtering a directory of thousands of entries costs one
-    /// position per match and no new names or paths.
-    fn refilter(&mut self, entries: &[Entry]) {
+    fn refilter(&mut self, entries: &[Entry], show_hidden: bool) {
         let matcher = Matcher::new(&self.query, self.mode.is_fuzzy());
 
         let matching: Vec<usize> = entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| matcher.matches(entry.name()))
+            .filter(|(_, entry)| {
+                let name = entry.name().to_string_lossy();
+                let is_hidden = name.starts_with('.');
+                if !show_hidden && is_hidden && self.query.is_empty() {
+                    return false;
+                }
+                matcher.matches(entry.name())
+            })
             .map(|(index, _)| index)
             .collect();
 
@@ -1519,17 +1538,11 @@ impl SearchState {
     }
 
     /// Takes a mode, keeping what the pane is showing true to it.
-    ///
-    /// What the previous mode found is forgotten: a walk's results answer a
-    /// question about a tree, and a listing's matches answer one about the
-    /// entries the pane loaded, so neither describes the other. Leaving the
-    /// recursive modes shows the listing again, which the pane already holds;
-    /// entering them means a walk is still to be run.
-    fn set_mode(&mut self, mode: SearchMode, entries: &[Entry]) {
+    fn set_mode(&mut self, mode: SearchMode, entries: &[Entry], show_hidden: bool) {
         self.mode = mode;
 
         self.forget_results();
-        self.refilter(entries);
+        self.refilter(entries, show_hidden);
     }
 
     /// Stores what a walk found, how it ended and how much it skipped.
@@ -2441,7 +2454,10 @@ impl App {
     /// cannot be read leaves no half-built state behind.
     pub fn at(directory: PathBuf) -> Result<Self, NavigationError> {
         let mut app = Self::default();
-        app.open_in(ActivePane::Left, directory)?;
+        app.open_in(ActivePane::Left, directory.clone())?;
+        app.open_in(ActivePane::Right, directory)?;
+        app.active_pane = ActivePane::Left;
+        app.refresh_preview();
         Ok(app)
     }
 
@@ -3286,18 +3302,25 @@ impl App {
 
             // Handled before this point; listed so that the match stays
             // exhaustive over every action.
+            Action::ToggleHidden => {
+                self.active_pane_mut().toggle_hidden();
+                self.refresh_preview();
+            }
+
+            // Handled before this point; listed so that the match stays
+            // exhaustive over every action.
             Action::Quit | Action::Cancel | Action::ClearSearch => {}
 
             // Recognised, but they cannot change the state yet: each one either
             // needs a filesystem operation, a state field that does not exist
             // yet, or the filesystem initialisation that resolves the working
             // directory. Nothing is faked for them, so the state stays truthful.
-            Action::MoveLeft | Action::MoveRight | Action::ToggleHidden => {}
+            Action::MoveLeft | Action::MoveRight => {}
         }
     }
 
     /// The pane the application acts on, mutably.
-    fn active_pane_mut(&mut self) -> &mut Pane {
+    pub fn active_pane_mut(&mut self) -> &mut Pane {
         self.pane_mut(self.active_pane)
     }
 
@@ -3327,7 +3350,7 @@ impl App {
         self.file_radar = FileRadarState::default();
         self.reveal_context = RevealContextState::new();
         self.preview.active = false;
-        self.preview.clear();
+        self.refresh_preview();
     }
 
     /// Discards the search of the pane the application acts on and leaves
@@ -3516,6 +3539,25 @@ impl App {
         let len = self.input_buffer.chars().count();
         if self.cursor_position < len {
             self.cursor_position += 1;
+        }
+    }
+
+    /// Moves cursor to the beginning of the input buffer.
+    pub fn input_move_cursor_home(&mut self) {
+        self.cursor_position = 0;
+    }
+
+    /// Moves cursor to the end of the input buffer.
+    pub fn input_move_cursor_end(&mut self) {
+        self.cursor_position = self.input_buffer.chars().count();
+    }
+
+    /// Deletes the character at the current cursor position.
+    pub fn input_delete_char(&mut self) {
+        let mut chars: Vec<char> = self.input_buffer.chars().collect();
+        if self.cursor_position < chars.len() {
+            chars.remove(self.cursor_position);
+            self.input_buffer = chars.into_iter().collect();
         }
     }
 
@@ -4337,10 +4379,6 @@ impl App {
 
     /// Refreshes the prepared preview content from the active pane's selected entry.
     pub fn refresh_preview(&mut self) {
-        if !self.preview.is_active() {
-            return;
-        }
-
         let active_pane = self.pane(self.active_pane);
         if let Some(path) = active_pane.selected_path() {
             let content = crate::preview::load_preview(&path);
@@ -5175,11 +5213,11 @@ mod tests {
             Some(crate::preview::PreviewContent::Metadata(_))
         ));
 
-        // Cancel leaves preview mode and clears content
+        // Cancel leaves preview mode and returns to normal mode with live preview
         app.handle_action(Action::Cancel);
         assert_eq!(app.mode(), Mode::Normal);
         assert!(!app.preview().is_active());
-        assert_eq!(app.preview().content(), None);
+        assert!(app.preview().content().is_some());
     }
 
     #[test]
@@ -5415,7 +5453,7 @@ mod tests {
         // active pane. Bookmarks joined them in Phase 12.1.
         // GitStatus joined them in Phase 18.2: it opens the Git Status Panel.
         // All of them have their own tests.
-        let unimplemented = [Action::MoveLeft, Action::MoveRight, Action::ToggleHidden];
+        let unimplemented = [Action::MoveLeft, Action::MoveRight];
 
         for action in unimplemented {
             let mut app = app_with(3);
@@ -6978,9 +7016,9 @@ mod tests {
             "the active pane starts in the directory the process runs in"
         );
         assert_eq!(
-            app.pane(ActivePane::Right),
-            &Pane::default(),
-            "the other pane starts empty, as it has since Phase 5.1"
+            app.pane(ActivePane::Right).current_path(),
+            &working_directory,
+            "both panes start initialized with the working directory"
         );
     }
 

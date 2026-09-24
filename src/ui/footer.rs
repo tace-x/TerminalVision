@@ -144,12 +144,45 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let mut left_spans = Vec::new();
     let sep = Span::styled(
         format!("{} ", theme.symbols.vertical_separator),
         theme.footer_separator,
     );
     let sep_width = display_width(&format!("{} ", theme.symbols.vertical_separator));
+
+    // Search mode: render dedicated search prompt and live query.
+    if app.mode() == crate::app::modes::Mode::Search {
+        let query = app.search().query();
+        let search_mode_label = match app.search().mode() {
+            crate::search::SearchMode::Basic => "BASIC",
+            crate::search::SearchMode::Recursive => "RECURSIVE",
+            crate::search::SearchMode::Fuzzy => "FUZZY",
+            crate::search::SearchMode::RecursiveFuzzy => "REC.FUZZY",
+        };
+        let match_count = app.pane(app.active_pane()).visible_count();
+        let search_text = format!(" Search: {query}█ ");
+        let sm_text = format!("[{search_mode_label}] ({match_count} matches) ");
+        let hint_search = "Enter: Done • Esc: Cancel • Tab: Mode";
+
+        let mut spans = vec![
+            Span::styled(" SEARCH ", theme.footer_mode),
+            sep.clone(),
+            Span::styled(search_text, theme.palette_selected),
+            Span::styled(sm_text, theme.footer_hint),
+        ];
+        let cur_w: usize = spans.iter().map(|s| display_width(&s.content)).sum();
+        let hint_w = display_width(hint_search);
+        if width > cur_w + hint_w {
+            let padding = width - cur_w - hint_w;
+            spans.push(Span::raw(" ".repeat(padding)));
+            spans.push(Span::styled(hint_search, theme.footer_hint));
+        }
+        let line = Line::from(spans);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
+    let mut left_spans = Vec::new();
 
     // 1. Mode (Priority 2)
     left_spans.push(Span::styled(mode_text, theme.footer_mode));

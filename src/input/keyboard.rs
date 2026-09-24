@@ -195,6 +195,8 @@ pub fn map_key_event(key: KeyEvent, mode: Mode) -> InputEvent {
         Mode::Search if !has_ctrl_or_alt => match key.code {
             KeyCode::Enter => InputEvent::SearchConfirm,
             KeyCode::Backspace => InputEvent::SearchBackspace,
+            KeyCode::Up => InputEvent::Action(Action::MoveUp),
+            KeyCode::Down => InputEvent::Action(Action::MoveDown),
             KeyCode::Char(c) => InputEvent::SearchChar(c),
             // Tab is handled as an Action (CycleSearchMode) above via map_key.
             _ => InputEvent::Ignored,
@@ -202,8 +204,11 @@ pub fn map_key_event(key: KeyEvent, mode: Mode) -> InputEvent {
         Mode::Create | Mode::Rename | Mode::Jump if !has_ctrl_or_alt => match key.code {
             KeyCode::Enter => InputEvent::ModalConfirm,
             KeyCode::Backspace => InputEvent::ModalBackspace,
+            KeyCode::Delete => InputEvent::ModalDelete,
             KeyCode::Left => InputEvent::ModalMoveCursorLeft,
             KeyCode::Right => InputEvent::ModalMoveCursorRight,
+            KeyCode::Home => InputEvent::ModalMoveCursorHome,
+            KeyCode::End => InputEvent::ModalMoveCursorEnd,
             KeyCode::Char(c) => InputEvent::ModalChar(c),
             _ => InputEvent::Ignored,
         },

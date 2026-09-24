@@ -64,15 +64,64 @@ fn run() -> io::Result<()> {
 }
 
 /// The application the loop runs, started in the working directory of the
-/// process.
-///
-/// The location is read from the operating system rather than assumed, and a
-/// process whose working directory cannot be determined is reported instead of
-/// being given a directory it was never started in.
+/// process or at the path supplied as a command-line argument.
 fn start_application() -> io::Result<App> {
-    let mut app = App::at_working_directory().map_err(io::Error::other)?;
-    let _ = app.load_persistent_state();
-    Ok(app)
+    let mut args = std::env::args().skip(1);
+    if let Some(first_arg) = args.next() {
+        if first_arg == "-h" || first_arg == "--help" {
+            println!("TerminalVision - Native Terminal File Manager");
+            println!();
+            println!("USAGE:");
+            println!("    terminalvision [PATH]");
+            println!();
+            println!("ARGS:");
+            println!(
+                "    <PATH>    Directory or file to open (default: current working directory)"
+            );
+            println!();
+            println!("FLAGS:");
+            println!("    -h, --help       Print help information");
+            println!("    -V, --version    Print version information");
+            std::process::exit(0);
+        }
+        if first_arg == "-V" || first_arg == "--version" {
+            println!("terminalvision {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+
+        let cwd = terminalvision::filesystem::FilesystemService::new()
+            .current_directory()
+            .map_err(io::Error::other)?;
+        let resolved = terminalvision::utils::path::resolve_target_path(&first_arg, &cwd);
+
+        if !resolved.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("path `{}` does not exist", resolved.display()),
+            ));
+        }
+
+        let metadata = std::fs::metadata(&resolved)?;
+        if metadata.is_dir() {
+            let mut app = App::at(resolved).map_err(io::Error::other)?;
+            let _ = app.load_persistent_state();
+            Ok(app)
+        } else {
+            // It's a regular file: open its parent directory and select the file in the active pane.
+            let parent = resolved.parent().unwrap_or(&cwd).to_path_buf();
+            let mut app = App::at(parent).map_err(io::Error::other)?;
+            let _ = app.load_persistent_state();
+            if let Some(file_name) = resolved.file_name() {
+                app.active_pane_mut().select_name(file_name);
+                app.refresh_preview();
+            }
+            Ok(app)
+        }
+    } else {
+        let mut app = App::at_working_directory().map_err(io::Error::other)?;
+        let _ = app.load_persistent_state();
+        Ok(app)
+    }
 }
 
 /// Applies one input event.
@@ -128,6 +177,15 @@ fn apply_input_event(
         }
         InputEvent::ModalMoveCursorRight => {
             app.input_move_cursor_right();
+        }
+        InputEvent::ModalMoveCursorHome => {
+            app.input_move_cursor_home();
+        }
+        InputEvent::ModalMoveCursorEnd => {
+            app.input_move_cursor_end();
+        }
+        InputEvent::ModalDelete => {
+            app.input_delete_char();
         }
         InputEvent::ModalNavigateUp => {
             if app.mode() == terminalvision::app::modes::Mode::CommandPalette {
