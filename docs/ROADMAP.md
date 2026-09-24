@@ -1,0 +1,25 @@
+# TerminalVision Roadmap
+
+- [x] 1. Project Foundation
+- [x] 2. Filesystem Core
+- [x] 3. Application Brain
+- [x] 4. Terminal Layout
+- [x] 5. File Navigation
+- [x] 6. File Management
+- [x] 7. Search & Sorting
+- [x] 8. Performance & Safety
+- [x] 9. Interface Integration
+- [x] 10. File Preview
+- [x] 11. User Interaction
+- [x] 12. Tabs & Bookmarks
+- [x] 13. Developer Features
+- [x] 14. Cross-Platform Support
+- [x] 15. Quality Audit (15.1 Functional, 15.2 Stress & Edge-Cases, 15.3 Architecture & UX)
+- [x] 16. Release & Distribution
+  - [x] 16.1 Release Profile & Release Builds
+  - [x] 16.2 Documentation & User Guidance
+  - [x] 16.3 Final Release Verification & Sign-off
+- [ ] 17. Signature Design System & UI Makeover
+  - [x] 17.1 TerminalVision Signature Design System
+  - [x] 17.2 Super-Responsive Layout Engine
+  - [ ] 17.3 File Panes, File Rows, and Modal Refinement

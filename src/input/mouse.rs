@@ -1,0 +1,693 @@
+//! Mouse input handling and hit testing.
+//!
+//! Translates terminal mouse events into semantic actions and application state updates
+//! based on geometry derived from the responsive layout engine.
+//!
+//! This module never performs filesystem operations directly.
+
+use std::time::{Duration, Instant};
+
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
+
+use crate::app::actions::Action;
+use crate::app::modes::Mode;
+use crate::app::state::{ActivePane, App};
+use crate::layout::geometry::{MainLayout, ScreenLayout};
+
+/// Maximum duration between two clicks on the same row to qualify as a double-click.
+pub const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(400);
+
+/// Tracks the previous click for double-click detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LastClick {
+    pane: ActivePane,
+    index: usize,
+    time: Instant,
+}
+
+/// Tracks mouse state across events, such as double-click timing.
+#[derive(Debug, Default, Clone)]
+pub struct MouseTracker {
+    last_click: Option<LastClick>,
+}
+
+impl MouseTracker {
+    /// Creates a new, empty mouse tracker.
+    pub fn new() -> Self {
+        Self { last_click: None }
+    }
+
+    /// Records a left click on `(pane, index)` at time `now`.
+    ///
+    /// Returns `true` if this click forms a valid double-click with the immediately
+    /// preceding click, resetting the tracker so subsequent clicks start a new sequence.
+    pub fn record_left_click(&mut self, pane: ActivePane, index: usize, now: Instant) -> bool {
+        if let Some(last) = self.last_click.take()
+            && last.pane == pane
+            && last.index == index
+            && now.saturating_duration_since(last.time) <= DOUBLE_CLICK_THRESHOLD
+        {
+            return true;
+        }
+
+        self.last_click = Some(LastClick {
+            pane,
+            index,
+            time: now,
+        });
+        false
+    }
+
+    /// Clears any recorded click state.
+    pub fn clear(&mut self) {
+        self.last_click = None;
+    }
+}
+
+/// Identifies which file pane (if any) contains the coordinate `(column, row)`.
+pub fn hit_test_pane(
+    column: u16,
+    row: u16,
+    terminal_area: Rect,
+    active_pane: ActivePane,
+) -> Option<(ActivePane, Rect)> {
+    let layout = ScreenLayout::calculate(terminal_area);
+
+    match layout.main() {
+        MainLayout::Single { pane } => {
+            if contains(pane, column, row) {
+                Some((active_pane, pane))
+            } else {
+                None
+            }
+        }
+        MainLayout::Two { left, right } => {
+            if contains(left, column, row) {
+                Some((ActivePane::Left, left))
+            } else if contains(right, column, row) {
+                Some((ActivePane::Right, right))
+            } else {
+                None
+            }
+        }
+        MainLayout::Three { left, right, .. } => {
+            if contains(left, column, row) {
+                Some((ActivePane::Left, left))
+            } else if contains(right, column, row) {
+                Some((ActivePane::Right, right))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Calculates the clicked tab index if the coordinate falls on a tab in the pane header.
+pub fn hit_test_tab(
+    column: u16,
+    row: u16,
+    pane_rect: Rect,
+    pane: &crate::app::state::Pane,
+    is_active: bool,
+) -> Option<usize> {
+    if row != pane_rect.y {
+        return None;
+    }
+    for (index, start_x, end_x) in crate::ui::panes::tab_hit_ranges(pane_rect, pane, is_active) {
+        if column >= start_x && column < end_x {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// Calculates the clicked item index inside a pane's file-list content area.
+///
+/// Returns `Some(index)` if the coordinate falls directly on a displayed entry row,
+/// or `None` if the coordinate is on the border, outside the pane, or on empty space
+/// below the last entry.
+pub fn hit_test_row(
+    column: u16,
+    row: u16,
+    pane_rect: Rect,
+    scroll_offset: usize,
+    total_count: usize,
+) -> Option<usize> {
+    // Inner area accounts for borders (1 cell padding on each side).
+    let inner_x = pane_rect.x.saturating_add(1);
+    let inner_y = pane_rect.y.saturating_add(1);
+    let inner_width = pane_rect.width.saturating_sub(2);
+    let inner_height = pane_rect.height.saturating_sub(2);
+
+    if inner_width == 0 || inner_height == 0 {
+        return None;
+    }
+
+    let inner = Rect::new(inner_x, inner_y, inner_width, inner_height);
+    if !contains(inner, column, row) {
+        return None;
+    }
+
+    let relative_row = row.saturating_sub(inner.y) as usize;
+    let clicked_index = scroll_offset.saturating_add(relative_row);
+
+    if clicked_index < total_count {
+        Some(clicked_index)
+    } else {
+        None
+    }
+}
+
+/// Whether `rect` contains `(x, y)`.
+fn contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
+}
+
+/// Applies a terminal mouse event to the application state with a specified timestamp.
+pub fn handle_mouse_event_at(
+    event: MouseEvent,
+    app: &mut App,
+    terminal_area: Rect,
+    tracker: &mut MouseTracker,
+    now: Instant,
+) {
+    if app.mode() != Mode::Normal {
+        return;
+    }
+
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let active = app.active_pane();
+            if let Some((pane, pane_rect)) =
+                hit_test_pane(event.column, event.row, terminal_area, active)
+            {
+                let scroll_offset = app.pane(pane).scroll_offset();
+                let total_count = app.pane(pane).visible_count();
+
+                if let Some(tab_index) = hit_test_tab(
+                    event.column,
+                    event.row,
+                    pane_rect,
+                    app.pane(pane),
+                    active == pane,
+                ) {
+                    tracker.clear();
+                    app.select_tab_in_pane(pane, tab_index);
+                } else if let Some(index) = hit_test_row(
+                    event.column,
+                    event.row,
+                    pane_rect,
+                    scroll_offset,
+                    total_count,
+                ) {
+                    if event
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                        || event
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::SHIFT)
+                    {
+                        app.set_active_pane(pane);
+                        app.pane_mut(pane).toggle_selection(index);
+                    } else {
+                        app.select_entry(pane, index);
+                    }
+                    let is_double = tracker.record_left_click(pane, index, now);
+                    if is_double {
+                        if app.pane(pane).is_directory_at(index) {
+                            app.handle_action(Action::Open);
+                        } else {
+                            app.handle_action(Action::Preview);
+                        }
+                    }
+                } else {
+                    // Clicked border or empty area inside pane
+                    tracker.clear();
+                    app.set_active_pane(pane);
+                }
+            } else {
+                // Clicked outside pane (header, footer, preview, separator)
+                tracker.clear();
+            }
+        }
+
+        MouseEventKind::Down(MouseButton::Right) => {
+            tracker.clear();
+            let active = app.active_pane();
+            if let Some((pane, pane_rect)) =
+                hit_test_pane(event.column, event.row, terminal_area, active)
+            {
+                let scroll_offset = app.pane(pane).scroll_offset();
+                let total_count = app.pane(pane).visible_count();
+
+                if let Some(index) = hit_test_row(
+                    event.column,
+                    event.row,
+                    pane_rect,
+                    scroll_offset,
+                    total_count,
+                ) {
+                    app.select_entry(pane, index);
+                } else {
+                    app.set_active_pane(pane);
+                }
+            }
+        }
+
+        MouseEventKind::ScrollUp => {
+            let active = app.active_pane();
+            if let Some((pane, _)) = hit_test_pane(event.column, event.row, terminal_area, active) {
+                app.set_active_pane(pane);
+            }
+            app.handle_action(Action::MoveUp);
+        }
+
+        MouseEventKind::ScrollDown => {
+            let active = app.active_pane();
+            if let Some((pane, _)) = hit_test_pane(event.column, event.row, terminal_area, active) {
+                app.set_active_pane(pane);
+            }
+            app.handle_action(Action::MoveDown);
+        }
+
+        _ => {
+            // Ignore mouse up, move, drag, middle button, etc.
+        }
+    }
+}
+
+/// Applies a terminal mouse event to the application state using the current wall clock time.
+pub fn handle_mouse_event(
+    event: MouseEvent,
+    app: &mut App,
+    terminal_area: Rect,
+    tracker: &mut MouseTracker,
+) {
+    handle_mouse_event_at(event, app, terminal_area, tracker, Instant::now());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tv_mouse_test_{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn mouse_down(column: u16, row: u16, button: MouseButton) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(button),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn mouse_scroll_up(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn mouse_scroll_down(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn test_hit_test_pane_single_layout() {
+        // Single pane layout (narrow terminal < 80 cols, e.g. 60x24)
+        let area = Rect::new(0, 0, 60, 24);
+        // Header is at row 0 (height 1). Main is rows 1..23. Footer is at row 23.
+        let hit = hit_test_pane(10, 5, area, ActivePane::Left);
+        assert!(hit.is_some());
+        let (pane, rect) = hit.unwrap();
+        assert_eq!(pane, ActivePane::Left);
+        assert_eq!(rect, Rect::new(0, 1, 60, 22));
+
+        // Click on header
+        assert!(hit_test_pane(10, 0, area, ActivePane::Left).is_none());
+        // Click on footer
+        assert!(hit_test_pane(10, 23, area, ActivePane::Left).is_none());
+    }
+
+    #[test]
+    fn test_hit_test_pane_two_layout() {
+        // Two pane layout (e.g. 100x30)
+        let area = Rect::new(0, 0, 100, 30);
+        // Left pane: cols 0..50, rows 1..29
+        // Right pane: cols 50..100, rows 1..29
+        let hit_left = hit_test_pane(20, 10, area, ActivePane::Left);
+        assert_eq!(hit_left.map(|(p, _)| p), Some(ActivePane::Left));
+
+        let hit_right = hit_test_pane(70, 10, area, ActivePane::Left);
+        assert_eq!(hit_right.map(|(p, _)| p), Some(ActivePane::Right));
+
+        // Outside main layout:
+        assert!(hit_test_pane(20, 0, area, ActivePane::Left).is_none()); // header
+        assert!(hit_test_pane(70, 29, area, ActivePane::Left).is_none()); // footer
+    }
+
+    #[test]
+    fn test_hit_test_pane_three_layout() {
+        // Wide layout (>= 160 cols, e.g. 180x40)
+        let area = Rect::new(0, 0, 180, 40);
+        // Left pane: 0..60, Right pane: 60..120, Preview: 120..180
+        let hit_left = hit_test_pane(10, 10, area, ActivePane::Left);
+        assert_eq!(hit_left.map(|(p, _)| p), Some(ActivePane::Left));
+
+        let hit_right = hit_test_pane(70, 10, area, ActivePane::Left);
+        assert_eq!(hit_right.map(|(p, _)| p), Some(ActivePane::Right));
+
+        // In preview area (last 1/3 of width = cols 120..180):
+        let hit_preview = hit_test_pane(140, 10, area, ActivePane::Left);
+        assert!(
+            hit_preview.is_none(),
+            "clicks in preview area must not hit a file pane"
+        );
+    }
+
+    #[test]
+    fn test_hit_test_row_calculations() {
+        let pane_rect = Rect::new(0, 1, 50, 20);
+        // Inner rect is x: 1..49, y: 2..20. (height = 18 rows)
+
+        // Top-left row (row 0)
+        assert_eq!(hit_test_row(1, 2, pane_rect, 0, 10), Some(0));
+        assert_eq!(hit_test_row(25, 2, pane_rect, 0, 10), Some(0));
+
+        // Row 3 with scroll_offset = 0
+        assert_eq!(hit_test_row(10, 5, pane_rect, 0, 10), Some(3));
+
+        // Row 3 with scroll_offset = 5
+        assert_eq!(hit_test_row(10, 5, pane_rect, 5, 10), Some(8));
+
+        // Last available entry
+        assert_eq!(hit_test_row(10, 2 + 9, pane_rect, 0, 10), Some(9));
+
+        // Empty space below entries (e.g. entry index 10 when total is 10)
+        assert_eq!(hit_test_row(10, 2 + 10, pane_rect, 0, 10), None);
+    }
+
+    #[test]
+    fn test_hit_test_row_boundaries_and_borders() {
+        let pane_rect = Rect::new(0, 1, 50, 20);
+
+        // On the top border (y = 1)
+        assert_eq!(hit_test_row(25, 1, pane_rect, 0, 10), None);
+        // On the bottom border (y = 20)
+        assert_eq!(hit_test_row(25, 20, pane_rect, 0, 10), None);
+        // On the left border (x = 0)
+        assert_eq!(hit_test_row(0, 5, pane_rect, 0, 10), None);
+        // On the right border (x = 49)
+        assert_eq!(hit_test_row(49, 5, pane_rect, 0, 10), None);
+
+        // Outside pane
+        assert_eq!(hit_test_row(60, 5, pane_rect, 0, 10), None);
+        assert_eq!(hit_test_row(25, 0, pane_rect, 0, 10), None);
+    }
+
+    #[test]
+    fn test_hit_test_row_tiny_rects() {
+        let zero_rect = Rect::new(0, 0, 0, 0);
+        assert_eq!(hit_test_row(0, 0, zero_rect, 0, 5), None);
+
+        let tiny_rect_1x1 = Rect::new(0, 0, 1, 1);
+        assert_eq!(hit_test_row(0, 0, tiny_rect_1x1, 0, 5), None);
+
+        let tiny_rect_2x2 = Rect::new(0, 0, 2, 2);
+        assert_eq!(hit_test_row(1, 1, tiny_rect_2x2, 0, 5), None);
+    }
+
+    #[test]
+    fn test_empty_pane_hit_testing() {
+        let pane_rect = Rect::new(0, 1, 50, 20);
+        // Total entries = 0
+        assert_eq!(hit_test_row(10, 5, pane_rect, 0, 0), None);
+    }
+
+    #[test]
+    fn test_left_click_selection_and_pane_activation() {
+        let dir = test_dir("click_select");
+        fs::write(dir.join("alpha.txt"), "a").unwrap();
+        fs::write(dir.join("beta.txt"), "b").unwrap();
+        fs::write(dir.join("gamma.txt"), "g").unwrap();
+
+        let mut app = App::at(dir.clone()).unwrap();
+        app.open_in(ActivePane::Right, dir).unwrap();
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+        let now = Instant::now();
+
+        // Right pane click selects and activates right pane
+        // Right pane inner is at x: 51..99, y: 2..29
+        let click_right_row1 = mouse_down(60, 3, MouseButton::Left); // Row 1 (beta.txt)
+        handle_mouse_event_at(click_right_row1, &mut app, terminal_area, &mut tracker, now);
+
+        assert_eq!(app.active_pane(), ActivePane::Right);
+        assert_eq!(app.pane(ActivePane::Right).selected_index(), Some(1));
+
+        // Left pane click switches back to left pane and selects row 2 (gamma.txt)
+        let click_left_row2 = mouse_down(10, 4, MouseButton::Left); // Row 2 (gamma.txt)
+        handle_mouse_event_at(click_left_row2, &mut app, terminal_area, &mut tracker, now);
+
+        assert_eq!(app.active_pane(), ActivePane::Left);
+        assert_eq!(app.pane(ActivePane::Left).selected_index(), Some(2));
+    }
+
+    #[test]
+    fn test_single_click_does_not_open_directory() {
+        let dir = test_dir("click_dir_no_open");
+        let sub = dir.join("subdir");
+        fs::create_dir_all(&sub).unwrap();
+
+        let mut app = App::at(dir.clone()).unwrap();
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+        let now = Instant::now();
+
+        let click = mouse_down(10, 2, MouseButton::Left); // Row 0 (subdir)
+        handle_mouse_event_at(click, &mut app, terminal_area, &mut tracker, now);
+
+        assert_eq!(app.pane(ActivePane::Left).current_path(), &dir);
+        assert_eq!(app.pane(ActivePane::Left).selected_index(), Some(0));
+    }
+
+    #[test]
+    fn test_double_click_directory_opens() {
+        let dir = test_dir("double_click_dir");
+        let sub = dir.join("subdir");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("child.txt"), "hi").unwrap();
+
+        let mut app = App::at(dir.clone()).unwrap();
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+        let t0 = Instant::now();
+
+        let click = mouse_down(10, 2, MouseButton::Left); // Row 0 (subdir)
+
+        // First click selects
+        handle_mouse_event_at(click, &mut app, terminal_area, &mut tracker, t0);
+        assert_eq!(app.pane(ActivePane::Left).current_path(), &dir);
+
+        // Second click within 200ms opens directory
+        let t1 = t0 + Duration::from_millis(200);
+        handle_mouse_event_at(click, &mut app, terminal_area, &mut tracker, t1);
+        assert_eq!(app.pane(ActivePane::Left).current_path(), &sub);
+    }
+
+    #[test]
+    fn test_double_click_file_triggers_preview() {
+        let dir = test_dir("double_click_file");
+        fs::write(dir.join("code.rs"), "fn main() {}").unwrap();
+
+        let mut app = App::at(dir).unwrap();
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+        let t0 = Instant::now();
+
+        let click = mouse_down(10, 2, MouseButton::Left); // Row 0 (code.rs)
+
+        // First click
+        handle_mouse_event_at(click, &mut app, terminal_area, &mut tracker, t0);
+        assert_eq!(app.mode(), Mode::Normal);
+
+        // Second click within threshold triggers preview
+        let t1 = t0 + Duration::from_millis(250);
+        handle_mouse_event_at(click, &mut app, terminal_area, &mut tracker, t1);
+        assert_eq!(app.mode(), Mode::Preview);
+        assert!(app.preview().is_active());
+    }
+
+    #[test]
+    fn test_double_click_slow_does_not_open() {
+        let dir = test_dir("double_click_slow");
+        let sub = dir.join("subdir");
+        fs::create_dir_all(&sub).unwrap();
+
+        let mut app = App::at(dir.clone()).unwrap();
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+        let t0 = Instant::now();
+
+        let click = mouse_down(10, 2, MouseButton::Left);
+        handle_mouse_event_at(click, &mut app, terminal_area, &mut tracker, t0);
+
+        // Second click after 600ms (threshold is 400ms)
+        let t1 = t0 + Duration::from_millis(600);
+        handle_mouse_event_at(click, &mut app, terminal_area, &mut tracker, t1);
+        assert_eq!(app.pane(ActivePane::Left).current_path(), &dir);
+    }
+
+    #[test]
+    fn test_right_click_selection() {
+        let dir = test_dir("right_click");
+        fs::write(dir.join("alpha.txt"), "a").unwrap();
+        fs::write(dir.join("beta.txt"), "b").unwrap();
+
+        let mut app = App::at(dir.clone()).unwrap();
+        app.open_in(ActivePane::Right, dir).unwrap();
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+        let now = Instant::now();
+
+        // Right click row 1 in right pane
+        let right_click = mouse_down(70, 3, MouseButton::Right);
+        handle_mouse_event_at(right_click, &mut app, terminal_area, &mut tracker, now);
+
+        assert_eq!(app.active_pane(), ActivePane::Right);
+        assert_eq!(app.pane(ActivePane::Right).selected_index(), Some(1));
+    }
+
+    #[test]
+    fn test_mouse_wheel_scrolling() {
+        let dir = test_dir("wheel_scroll");
+        fs::write(dir.join("f1.txt"), "1").unwrap();
+        fs::write(dir.join("f2.txt"), "2").unwrap();
+        fs::write(dir.join("f3.txt"), "3").unwrap();
+
+        let mut app = App::at(dir).unwrap();
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+
+        assert_eq!(app.pane(ActivePane::Left).selected_index(), Some(0));
+
+        // Wheel down moves selection down
+        let scroll_down = mouse_scroll_down(10, 5);
+        handle_mouse_event(scroll_down, &mut app, terminal_area, &mut tracker);
+        assert_eq!(app.pane(ActivePane::Left).selected_index(), Some(1));
+
+        handle_mouse_event(scroll_down, &mut app, terminal_area, &mut tracker);
+        assert_eq!(app.pane(ActivePane::Left).selected_index(), Some(2));
+
+        // Wheel up moves selection up
+        let scroll_up = mouse_scroll_up(10, 5);
+        handle_mouse_event(scroll_up, &mut app, terminal_area, &mut tracker);
+        assert_eq!(app.pane(ActivePane::Left).selected_index(), Some(1));
+    }
+
+    #[test]
+    fn test_temporary_modes_block_mouse_actions() {
+        let dir = test_dir("temp_modes");
+        let sub = dir.join("subdir");
+        fs::create_dir_all(&sub).unwrap();
+
+        let mut app = App::at(dir.clone()).unwrap();
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+        let now = Instant::now();
+
+        // Put app into Search mode
+        app.handle_action(Action::StartSearch);
+        assert_eq!(app.mode(), Mode::Search);
+
+        // Click should be completely ignored in Search mode
+        let click = mouse_down(10, 2, MouseButton::Left);
+        handle_mouse_event_at(click, &mut app, terminal_area, &mut tracker, now);
+
+        assert_eq!(app.mode(), Mode::Search);
+        assert_eq!(app.pane(ActivePane::Left).current_path(), &dir);
+    }
+
+    #[test]
+    fn test_clicks_outside_content_safely_ignored() {
+        let dir = test_dir("outside_clicks");
+        fs::write(dir.join("item.txt"), "1").unwrap();
+
+        let mut app = App::at(dir).unwrap();
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+        let now = Instant::now();
+
+        // Header click (row 0)
+        let header_click = mouse_down(20, 0, MouseButton::Left);
+        handle_mouse_event_at(header_click, &mut app, terminal_area, &mut tracker, now);
+        assert_eq!(app.pane(ActivePane::Left).selected_index(), Some(0));
+
+        // Footer click (row 29)
+        let footer_click = mouse_down(20, 29, MouseButton::Left);
+        handle_mouse_event_at(footer_click, &mut app, terminal_area, &mut tracker, now);
+        assert_eq!(app.pane(ActivePane::Left).selected_index(), Some(0));
+    }
+
+    #[test]
+    fn test_mouse_tab_click_switches_tab() {
+        let dir1 = test_dir("mouse_tab_1");
+        let dir2 = test_dir("mouse_tab_2");
+        fs::write(dir1.join("file1.txt"), "1").unwrap();
+        fs::write(dir2.join("file2.txt"), "2").unwrap();
+
+        let mut app = App::at(dir1.clone()).unwrap();
+        // Add second tab
+        app.open_in(ActivePane::Left, dir2.clone()).unwrap();
+        app.handle_action(Action::NewTab);
+        // Now tab 0: dir1, tab 1: dir2 (active)
+        assert_eq!(app.pane(ActivePane::Left).tab_count(), 2);
+
+        let mut tracker = MouseTracker::new();
+        let terminal_area = Rect::new(0, 0, 100, 30);
+        let layout = ScreenLayout::calculate(terminal_area);
+        let pane_rect = match layout.main() {
+            MainLayout::Two { left, .. } => left,
+            MainLayout::Three { left, .. } => left,
+            MainLayout::Single { pane } => pane,
+        };
+
+        // Find hit range for tab 0
+        let ranges = crate::ui::panes::tab_hit_ranges(pane_rect, app.pane(ActivePane::Left), true);
+        assert!(ranges.len() >= 2);
+        let (tab0_idx, tab0_start, tab0_end) = ranges[0];
+        assert_eq!(tab0_idx, 0);
+
+        // Click on tab 0 in the pane header row (pane_rect.y)
+        let click_x = (tab0_start + tab0_end) / 2;
+        let tab_click = mouse_down(click_x, pane_rect.y, MouseButton::Left);
+        handle_mouse_event_at(
+            tab_click,
+            &mut app,
+            terminal_area,
+            &mut tracker,
+            Instant::now(),
+        );
+
+        assert_eq!(app.pane(ActivePane::Left).active_tab_index(), 0);
+    }
+}

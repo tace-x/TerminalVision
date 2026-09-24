@@ -1,0 +1,17 @@
+# Build output
+target/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Editor & IDE files
+.vscode/
+.idea/
+*.swp
+*~
+*.bak
+
+# Temporary files
+*.tmp
+*.log
