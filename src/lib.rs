@@ -19,5 +19,6 @@ pub mod input;
 pub mod layout;
 pub mod preview;
 pub mod search;
+pub mod terminal;
 pub mod ui;
 pub mod utils;

@@ -329,6 +329,24 @@ pub struct Theme {
     // --- Empty States ---
     /// Empty directory / no matches placeholder text.
     pub empty_state_text: Style,
+
+    // --- Integrated Terminal Panel ---
+    /// Active / focused terminal border type.
+    pub active_terminal_border_type: BorderType,
+    /// Active / focused terminal border style.
+    pub active_terminal_border: Style,
+    /// Inactive / unfocused terminal border type.
+    pub inactive_terminal_border_type: BorderType,
+    /// Inactive / unfocused terminal border style.
+    pub inactive_terminal_border: Style,
+    /// Terminal title style when focused.
+    pub terminal_title_focused: Style,
+    /// Terminal title style when unfocused.
+    pub terminal_title_unfocused: Style,
+    /// Terminal metadata style when focused.
+    pub terminal_meta_focused: Style,
+    /// Terminal metadata style when unfocused.
+    pub terminal_meta_unfocused: Style,
 }
 
 impl Default for Theme {
@@ -454,6 +472,35 @@ impl Theme {
 
             // Empty States
             empty_state_text: Style::new().fg(Color::DarkGray),
+
+            // Integrated Terminal Panel
+            active_terminal_border_type: BorderType::Thick,
+            active_terminal_border: Style::new().fg(Color::LightCyan),
+            inactive_terminal_border_type: BorderType::Plain,
+            inactive_terminal_border: Style::new().fg(Color::DarkGray),
+            terminal_title_focused: Style::new()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+            terminal_title_unfocused: Style::new()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+            terminal_meta_focused: Style::new().fg(Color::LightCyan),
+            terminal_meta_unfocused: Style::new().fg(Color::DarkGray),
+        }
+    }
+
+    /// Resolves the border type and style for the integrated terminal panel.
+    pub fn terminal_border(&self, is_focused: bool) -> (BorderType, Style) {
+        if is_focused {
+            (
+                self.active_terminal_border_type,
+                self.active_terminal_border,
+            )
+        } else {
+            (
+                self.inactive_terminal_border_type,
+                self.inactive_terminal_border,
+            )
         }
     }
 

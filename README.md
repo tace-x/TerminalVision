@@ -1,296 +1,236 @@
-# TerminalVision
+# ⚡ TerminalVision
 
 > See your filesystem. Understand your project. Control everything without leaving the terminal.
 
-TerminalVision is a high-performance, native Rust terminal file manager and developer intelligence tool designed for keyboard-first, mouse-capable filesystem navigation. It runs completely local and offline, with zero shell or external binary execution.
+[![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-macOS_%7C_Linux_%7C_Windows-lightgrey.svg?style=flat-square)](https://github.com/tace-x/TerminalVision)
+[![Terminal](https://img.shields.io/badge/Terminal-PTY_%26_Ratatui-cyan.svg?style=flat-square)](https://github.com/tace-x/TerminalVision)
+
+**TerminalVision** is a high-performance, native Rust terminal file manager, developer cockpit, and integrated interactive shell environment. It combines side-by-side dual-pane navigation, syntax-highlighted code preview, image inspection, in-process Git analytics, and a **real, live PTY terminal** always visible and ready for keyboard control.
 
 ---
 
-## Technical Overview
+## ✨ Features
 
-- **Language & Runtime**: 100% Rust (2024 edition, stable toolchain)
-- **TUI & Rendering Engine**: [Ratatui](https://crates.io/crates/ratatui) (0.30)
-- **Terminal Input & Backend**: [Crossterm](https://crates.io/crates/crossterm) (0.29)
-- **Architecture**: Layered, event-driven design (`UI` → `Application` → `Domain / Filesystem` → `OS`)
-- **Dependencies**: Ultra-minimal, zero subprocess execution (`cp`, `mv`, `rm`, `git`, `sh` are never spawned)
-- **Binary Footprint**: Single self-contained binary (< 1.5 MB release build)
-
----
-
-## Core Characteristics
-
-- **Native Terminal Application**: Runs cleanly directly inside standard terminal emulators without webviews, Electron, Node.js, or browser runtimes.
-- **Cross-Platform Compatibility**: Fully abstracted path handling and filesystem operations supporting macOS, Linux, and Windows.
-- **Pure Filesystem API Integration**: Performs file and directory operations using Rust's standard library `std::fs` and `std::path` APIs instead of invoking shell utilities.
-- **Keyboard-First Design**: Complete Vim-style (`h`/`j`/`k`/`l`) and arrow-key navigation with shortcuts for every file management action.
-- **Mouse Interaction**: Full mouse support including single-click selection, double-click to navigate/preview, tab switching, and scroll-wheel browsing.
-- **Responsive TUI**: Dynamic screen geometry calculation that automatically adapts from compact single-pane view (< 80 columns) to dual-pane view and 3-column preview layout (160+ columns).
-- **Distraction-Free Focus Mode**: Single-key toggle (`Z` or `Ctrl+F`) to maximize the active pane across the entire terminal width.
-- **In-Process Git & Project Intelligence**: Pure in-process Git repository inspection (reading `.git` HEAD and index directly) and multi-ecosystem project detection without subprocess calls.
+- 🖥️ **Integrated Real Interactive Terminal**: Bottom panel contains a live Unix pseudo-terminal (PTY) running your system shell (`zsh`, `bash`, `fish`, `sh`). Type commands, run `nano`, `vim`, `python`, `top`, or `ssh` with instant focus toggling (`Ctrl+T` or `F12`).
+- 📁 **Dual-Pane File Manager**: Side-by-side directory browsing with independent tabs, active pane indicators, multi-item selection (`Space`, `Ctrl+A`, `*`), and sort modes (Name, Size, Modified Date, Type).
+- 🖼️ **Image & Media Inspection**: Instant dimension, bit depth, color model, and aspect ratio decoding for **PNG**, **JPEG**, **GIF**, **BMP**, and **WEBP** images with adaptive canvas preview frames.
+- 📖 **Safe Code & Text Preview**: Syntax-highlighted read-only viewer for 20+ programming languages and configuration formats with line numbers, safe byte limits, and ANSI sanitization.
+- 🔎 **Live & Recursive Search**: Instant case-insensitive filtering (`/`) with multi-mode cycling (`Tab`): Basic, Recursive background walk, Fuzzy matching, and Deep Recursive Fuzzy.
+- 🔄 **Bidirectional Directory Sync**: Synchronize terminal shell working directory to file manager panes (`Action::SyncTerminalToDirectory`) and file manager to shell (`Action::SyncDirectoryToTerminal`), plus live refresh (`Action::RefreshDirectory`).
+- 🧠 **Developer Intelligence**:
+  - **Project Cockpit (`P`)**: Detects project roots (Cargo, npm, Python, Go, Java), manifests, README, license, and source trees.
+  - **Git Status Panel (`G`)**: Live in-process repo inspection showing modified, added, deleted, renamed, and untracked files.
+  - **File Radar (`F`)**: Instant directory breakdown with file/dir/symlink/hidden counts, byte sizing, and extension distribution.
+  - **Reveal Context (`C`)**: Hierarchical context inspector (`File` → `Directory` → `Project Root` → `Git Root`).
+  - **Smart Jump (`J`)**: Unified fuzzy location picker across Git roots, bookmarks, history, and tabs.
+- 🎮 **Command Palette (`Ctrl+P`)**: Fuzzy searchable command launcher with keyboard shortcut discovery.
+- 🐭 **Full Mouse Support**: Left-click to select rows and tabs, double-click to navigate directories or preview files, right-click to inspect, mouse-wheel scrolling, and click-to-focus on the terminal panel.
+- 🔒 **Zero Unintended Execution**: Selecting or opening files in the file manager never executes arbitrary code or scripts. Commands only execute when you explicitly type them into the embedded terminal.
 
 ---
 
-## Features
+## 🖥️ Integrated Interactive Terminal
 
-### Dual-Pane File Navigation
-Browse two directories side by side with independent tab state, active pane switching (`Tab`), and entry sorting (by Name, Size, Modified Date, or File Type). Toggle hidden dotfiles instantly (`.`).
+TerminalVision features a permanent, responsive bottom terminal panel backed by a true Unix PTY (`libc::openpty`) and ANSI terminal emulator:
 
-### Safe File Operations
-Create files (`n`), create directories (`N`), rename entries (`r`), copy (`y`), cut (`x`), and paste (`p`) with conflict detection to prevent accidental overwrites. Delete (`d`) opens a confirmation modal before removing entries.
+```
+┌────────────────────────────────────────────────────────────┐
+│ TerminalVision v0.1.0                     [NORMAL] [LEFT]  │
+├─────────────────────┬───────────────────┬──────────────────┤
+│ LEFT PANE           │ RIGHT PANE        │ PREVIEW          │
+│ > src/              │   Cargo.toml      │ fn main() {      │
+│   docs/             │   README.md       │     run()?;      │
+│   tests/            │   target/         │ }                │
+├─────────────────────┴───────────────────┴──────────────────┤
+│ ⚡ TERMINAL (zsh: ~/TerminalVision)        [Ctrl+T to focus]│
+│ user@Mac ~/TerminalVision % ls -la                         │
+│ drwxr-xr-x  src                                            │
+│ -rw-r--r--  Cargo.toml                                     │
+│ user@Mac ~/TerminalVision % echo "Hello TerminalVision!"   │
+│ Hello TerminalVision!                                      │
+├────────────────────────────────────────────────────────────┤
+│ NORMAL │ LEFT │ 1 / 3 │ ~/TerminalVision                   │
+└────────────────────────────────────────────────────────────┘
+```
 
-### Multi-Item Selection
-Select multiple entries using `Space`, select all (`Ctrl+A`), invert selection (`*`), or deselect all (`u`). Perform batch copy, cut, or delete operations seamlessly.
-
-### Read-Only Code & File Preview
-Inspect text files and source code (`v` or double-click) with lightweight syntax highlighting (Rust, JavaScript, TypeScript, Python, Java, C, C++, Go, PHP, Ruby, C#, HTML, CSS, JSON, TOML, YAML, Markdown, Shell). Previews enforce strict safety bounds (max 1 MB read limit, line limits) and sanitize terminal escape sequences.
-
-### Live & Recursive Search
-Filter current directory listings in real time (`/`). Cycle through search modes with `Tab`:
-1. **Basic**: Fast case-insensitive substring search.
-2. **Recursive**: Non-blocking background directory tree traversal.
-3. **Fuzzy**: Approximate matching for quick file discovery.
-4. **Recursive + Fuzzy**: Deep fuzzy matching across the full directory hierarchy.
-
-### Multi-Tab & Directory Bookmarks
-Open independent directory tabs per pane (`t`, `w`, `[`, `]`, `T` to duplicate). Save frequently accessed directories to persistent bookmarks (`b`, `B`) stored in standard user configuration directories.
-
-### Developer Intelligence & Power Tools
-- **Project Cockpit (`P`)**: Developer overview modal showing project ecosystem, root, branch, manifest (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `pom.xml`, etc.), README, LICENSE, source directory, and quick actions.
-- **Git Status Panel (`G`)**: Interactive overview of all modified (`M`), added (`A`), deleted (`D`), renamed (`R`), and untracked (`?`) files with direct navigation to changed items.
-- **File Radar & Directory Insights (`F`)**: Instant directory breakdown with file/dir/symlink/hidden counts, total byte sizing, and top file type distribution.
-- **Reveal Context (`C`)**: Hierarchical context inspector displaying the chain from `Current File` → `Parent Directory` → `Project Root` → `Git Repository Root` with quick jump navigation.
-- **Smart Jump (`J`)**: Unified fuzzy location picker aggregating Git root, project root, home, bookmarks, and tab history.
-
-### Command Palette & Interactive Help
-Press `Ctrl+P` to launch a fuzzy-filterable Command Palette to discover and execute any application action. Press `?` for an interactive cheat-sheet of keyboard shortcuts and mouse controls.
+### Supported Shell & Interactive Capabilities:
+- **Default Shell**: Spawns your `$SHELL` (or `/bin/zsh`, `/bin/bash`, `/bin/sh`).
+- **Interactive Applications**: Supports `nano`, `vim`, `python`, `top`, `git`, `ssh`, and full TUI tools inside the PTY.
+- **Dynamic Resize**: Resizing the window automatically computes new columns and rows and sends `TIOCSWINSZ` to the child shell.
+- **Terminal Scrollback**: Bounded scrollback buffer (up to 2,000 lines) with dedicated keyboard and mouse-wheel scrolling (`Action::ScrollTerminalUp` / `ScrollTerminalDown`).
+- **Focus Separation**: Press `Ctrl+T` or `F12` (or click inside the terminal panel) to focus the terminal for direct typing. Press `Ctrl+T` or click on any file pane to return to file manager navigation.
 
 ---
 
-## Requirements & Platform Support
+## 🖼️ Image Preview
 
-### Supported Platforms
+TerminalVision inspects binary headers to decode image metadata and dimensions without external dependencies:
 
-| Platform | Target Architecture | Build & Test Status |
+| Format | Extensions | Detected Metadata |
 | --- | --- | --- |
-| **macOS** | `aarch64-apple-darwin` / `x86_64-apple-darwin` | **Fully Verified** |
-| **Linux** | `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu` | **Fully Verified** |
-| **Windows** | `x86_64-pc-windows-msvc` / `x86_64-pc-windows-gnu` | **Fully Verified** |
+| **PNG** | `.png` | Width, Height, Bit Depth, Color Type (RGBA/RGB/Grayscale), Aspect Ratio |
+| **JPEG** | `.jpg`, `.jpeg` | Width, Height, Precision, Channels (sRGB / YCbCr / CMYK), Aspect Ratio |
+| **GIF** | `.gif` | Width, Height, Version (`GIF87a` / `GIF89a`), Aspect Ratio |
+| **BMP** | `.bmp` | Width, Height, Planes, Bits Per Pixel (24-bit / 32-bit), Aspect Ratio |
+| **WEBP** | `.webp` | Width, Height, VP8 format (Simple / Extended canvas), Aspect Ratio |
 
-### Supported Terminals
-- macOS: Terminal.app, iTerm2, Alacritty, Kitty, Ghostty, WezTerm
-- Linux: GNOME Terminal, Konsole, Alacritty, Kitty, WezTerm, foot, xterm
-- Windows: Windows Terminal, PowerShell, Command Prompt, WezTerm, Alacritty
+*Fallback*: If the terminal emulator does not support inline graphics protocols (Kitty/Sixel), TerminalVision renders a clean, styled technical specification card with canvas dimensions and aspect ratio framing.
 
 ---
 
-## Installation & Building
+## ⚡ Installation & Building
 
 ### Prerequisites
-
 - [Rust Toolchain](https://www.rust-lang.org/) (Stable compiler targeting Rust 2024 edition, 1.85+)
 - Cargo package manager
 
-### Build from Source
-
+### 1. Clone Repository
 ```bash
-# Clone the repository
-git clone https://github.com/immanuelmelbin/TerminalVision.git
+git clone https://github.com/tace-x/TerminalVision.git
 cd TerminalVision
-
-# Build optimized release binary
-cargo build --release
 ```
 
-The compiled release binary is located at:
-- `target/release/TerminalVision` (macOS / Linux)
-- `target/release/TerminalVision.exe` (Windows)
+### 2. Build Release Binary
+```bash
+cargo build --release
+```
+The compiled binary will be at `target/release/TerminalVision` (or `terminalvision.exe` on Windows).
 
-### Cargo Local Installation
-
+### 3. Install to Cargo Path
 ```bash
 cargo install --path .
 ```
+Ensure `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin`) is in your system `PATH`.
 
-Ensure `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin` on Windows) is in your system `PATH`.
-
----
-
-## Launching TerminalVision
-
-TerminalVision is a native terminal file manager.
-
+### 4. Launch TerminalVision
 ```bash
-# Launch in the current working directory
+# Launch in current working directory
 terminalvision
-# or
-terminalvision .
 
-# Launch starting in a specific directory
-terminalvision ~/Documents
-terminalvision /tmp
-terminalvision C:\Projects
+# Launch in a specific directory
+terminalvision ~/Projects/TerminalVision
 
 # Launch targeting a specific file (opens parent directory and selects the file)
 terminalvision src/main.rs
 
-# Display help or version
+# Display command line flags
 terminalvision --help
 terminalvision --version
 ```
 
-### Startup Path Behavior:
-- **No arguments / `.`**: Opens the shell's current working directory.
-- **Directory Path**: Opens the specified directory in both panes. Tilde expansion (`~` or `~/...`) is supported on Unix-like systems.
-- **File Path**: Opens the file's parent directory and automatically places selection on the targeted file. Does **not** execute the file.
-- **Missing or Inaccessible Path**: Reports a clean, human-readable startup error and exits safely without corrupting the terminal.
+### 5. Updating
+```bash
+git pull origin main
+cargo install --path . --force
+```
+
+### 6. Uninstalling
+```bash
+cargo uninstall terminalvision
+```
 
 ---
 
-## Keyboard Shortcuts
+## 🎮 Controls & Shortcuts
 
-### Normal Mode (Navigation & File Browsing)
-
+### Focus Management
 | Shortcut | Action | Description |
 | --- | --- | --- |
-| `Up` / `k` | Move Up | Move selection up one entry |
-| `Down` / `j` | Move Down | Move selection down one entry |
+| `Ctrl+T` / `F12` | Toggle Focus | Switch focus between File Manager and Embedded Terminal |
+| `Left Click` | Focus Click | Click file pane or terminal panel to switch focus |
+
+### File Manager (Normal Mode)
+| Shortcut | Action | Description |
+| --- | --- | --- |
+| `Up` / `k` | Move Up | Move selection up |
+| `Down` / `j` | Move Down | Move selection down |
 | `Left` / `h` | Move Left | Navigate left / select |
 | `Right` / `l` | Move Right | Navigate right / select |
-| `Enter` | Open | Open selected directory |
-| `Backspace` | Go Parent | Navigate up to parent directory |
-| `Home` | Jump to First | Jump to first entry in current directory |
-| `End` | Jump to Last | Jump to last entry in current directory |
-| `PageUp` | Page Up | Scroll selection up by one visible page |
-| `PageDown` | Page Down | Scroll selection down by one visible page |
-| `Tab` | Switch Pane | Toggle active pane focus (Left / Right) |
-| `g` | Jump to Path | Open path jump input modal (supports `~`, absolute, relative) |
-| `J` / `Shift+J` | Smart Jump | Open unified Smart Jump picker (Roots, Bookmarks, History, Tabs) |
-| `Alt+Left` | History Back | Navigate back in tab directory history |
-| `Alt+Right` | History Forward | Navigate forward in tab directory history |
-| `n` | New File | Open modal to create a new file |
-| `N` / `Shift+N` | New Directory | Open modal to create a new directory |
-| `r` | Rename | Open modal to rename selected entry |
-| `y` | Copy | Copy selected entry to clipboard buffer |
-| `x` | Cut | Cut selected entry to clipboard buffer |
-| `p` | Paste | Paste clipboard entries into active directory |
-| `d` | Delete | Prompt confirmation to delete selected entry |
-| `Space` | Toggle Select | Toggle multi-selection on current item |
-| `Ctrl+A` | Select All | Select all entries in active pane |
-| `u` | Deselect All | Clear all selected entries in active pane |
-| `*` | Invert Selection | Invert item selection in active pane |
-| `.` | Toggle Hidden | Show or hide hidden (dot) files |
-| `s` | Change Sort | Cycle sort order (Name → Size → Modified → Type) |
-| `v` | Preview | Toggle read-only file preview overlay |
-| `Z` / `Ctrl+F` | Focus Mode | Toggle distraction-free full-width focus mode |
-| `P` / `Shift+P` | Project Cockpit | Open Project Cockpit with project details and quick navigation |
-| `G` / `Shift+G` | Git Status | Open Git Status Panel with changed files list |
-| `F` / `Shift+F` | File Radar | Open File Radar directory metrics & extension distribution |
-| `C` / `Shift+C` | Reveal Context | Open Reveal Context hierarchy inspector (File → Dir → Project → Git) |
-| `b` | Add Bookmark | Save active directory to bookmarks |
-| `B` / `Shift+B` | Open Bookmarks | Open directory bookmarks manager modal |
-| `t` | New Tab | Open a new tab in the active pane |
-| `T` / `Shift+T` | Duplicate Tab | Duplicate the active tab and its state |
-| `w` | Close Tab | Close the active tab in the active pane |
-| `]` | Next Tab | Switch to the next tab in active pane |
-| `[` | Previous Tab | Switch to the previous tab in active pane |
-| `/` | Search | Activate live in-directory search |
-| `Ctrl+P` | Command Palette | Open fuzzy categorized command palette overlay |
-| `?` | Help | Show keyboard shortcuts and mouse help modal |
-| `q` | Quit | Exit TerminalVision cleanly |
-| `Esc` | Cancel | Clear active selection, notification, or close modal |
-| `Ctrl+C` | Force Quit | Unconditional immediate exit request |
+| `Enter` | Open | Open selected directory (never executes files) |
+| `Backspace` | Parent Dir | Navigate to parent directory |
+| `Home` / `End` | First / Last | Jump to first / last entry |
+| `PageUp` / `PageDown` | Page Scroll | Scroll by visible page |
+| `Tab` | Switch Pane | Toggle active pane (Left / Right) |
+| `n` / `N` | New File / Dir | Create file (`n`) or directory (`N` / `Shift+N`) |
+| `r` | Rename | Rename selected entry |
+| `y` / `x` / `p` | Copy / Cut / Paste | Clipboard operations |
+| `d` | Delete | Delete entry with confirmation |
+| `Space` | Toggle Select | Multi-select item |
+| `Ctrl+A` / `u` / `*` | Select All / Clear / Invert | Batch selection |
+| `.` | Toggle Hidden | Show/hide hidden dotfiles |
+| `s` | Change Sort | Cycle sort (Name → Size → Modified → Type) |
+| `v` | Preview | Open read-only preview overlay |
+| `Z` / `Ctrl+F` | Focus Mode | Full-width single pane mode |
+| `g` / `J` | Jump / Smart Jump | Jump to path (`g`) or unified location picker (`J`) |
+| `P` | Project Cockpit | Developer project intelligence overview |
+| `G` | Git Status | In-process Git repository changes |
+| `F` | File Radar | Directory statistics and size metrics |
+| `C` | Reveal Context | Context hierarchy inspector |
+| `b` / `B` | Bookmarks | Add bookmark (`b`) or open bookmarks (`B`) |
+| `t` / `w` / `[` / `]` | Tabs | New tab (`t`), close (`w`), prev (`[`), next (`]`) |
+| `/` | Search | Live search filter (`Tab` to cycle search modes) |
+| `Ctrl+P` | Command Palette | Discover and execute commands |
+| `?` | Help | Interactive cheat-sheet |
+| `q` / `Ctrl+C` | Quit | Exit TerminalVision cleanly |
 
-### Search Mode
+### Terminal Mode (When Terminal is Focused)
+| Shortcut | Action | Description |
+| --- | --- | --- |
+| `Printable Keys` | Shell Input | Characters sent directly to PTY shell process |
+| `Enter` | Execute | Sends carriage return / newline to shell |
+| `Backspace` | Delete | Sends `0x7F` backspace to shell |
+| `Arrow Keys` | Cursor / History | Navigation in shell and interactive programs |
+| `Ctrl+C` | SIGINT | Sent to foreground process in shell |
+| `Ctrl+D` | EOF | Sent to shell |
+| `Ctrl+T` / `F12` | Toggle Focus | Return focus to File Manager |
+| `Mouse Wheel` | Terminal Scroll | Scroll terminal scrollback history |
 
-| Shortcut | Action |
-| --- | --- |
-| Printable Chars | Append character to live search query (supports `*.rs`, `ext:rs`, subpaths) |
-| `Backspace` | Remove last character from search query |
-| `Tab` | Cycle search mode (Basic → Recursive → Fuzzy → Recursive + Fuzzy) |
-| `Enter` | Confirm search selection and return to Normal mode |
-| `Esc` | Cancel search and restore full directory listing |
-
-### Modals & Text Input
-
-| Mode | Shortcuts & Behavior |
-| --- | --- |
-| **Create / Rename** | Type text, `Left`/`Right` to move cursor, `Backspace` to delete, `Enter` to confirm, `Esc` to cancel. |
-| **Path Jump (`g`)** | Type path (`~`, relative, or absolute), `Enter` to navigate directly, `Esc` to cancel. |
-| **Smart Jump (`J`)** | Live filter locations across Git Root, Project, Bookmarks, History, and Tabs. `Up`/`Down` to navigate, `Enter` to jump, `Esc` to close. |
-| **Project Cockpit (`P`)** | `Up`/`k` & `Down`/`j` to select action (Go Root, Open Manifest, Open README, Open License, Go Source), `Enter` to execute, `Esc` to close. |
-| **Git Status Panel (`G`)** | `Up`/`k` & `Down`/`j` to browse changed repository files, `Enter` to jump to file in pane, `Esc` to close. |
-| **File Radar (`F`)** | Inspect visible entries, file/dir counts, bytes, and top file type distribution. `Esc`/`q` to close. |
-| **Reveal Context (`C`)** | `Up`/`k` & `Down`/`j` to inspect hierarchical context layers (File → Parent → Project → Git), `Enter` to navigate, `Esc` to close. |
-| **Confirm Modal** | `Enter` to execute, `Tab`/`Left`/`Right`/`h`/`l` to toggle selection, `y`/`Y` for Yes, `n`/`N` for No, `Esc` to cancel. |
-| **Command Palette** | Filter categorized commands with shortcuts, `Up`/`Down` to navigate list, `Enter` to execute command, `Esc` to close. |
-| **Bookmarks Modal** | `Up`/`k` & `Down`/`j` to select bookmark, `Enter` to jump, `d`/`x`/`Delete` to remove bookmark, `q`/`Esc` to close. |
-
----
-
-## Mouse Controls
-
+### Mouse Controls
 | Interaction | Context | Action |
 | --- | --- | --- |
-| **Left Click** | Entry row | Selects entry and activates pane |
-| **Double Left Click** | Directory entry | Navigates into directory |
-| **Double Left Click** | File entry | Opens read-only file preview |
-| **Left Click** | Tab in pane header | Switches to clicked tab |
-| **Left Click** | Pane border / area | Activates clicked pane |
-| **Right Click** | Entry row | Selects entry and activates pane |
-| **Mouse Wheel Up** | Pane area | Moves item selection up |
-| **Mouse Wheel Down** | Pane area | Moves item selection down |
+| **Left Click** | File Pane Row | Selects entry and activates pane |
+| **Double Click** | Directory Row | Navigates into directory |
+| **Double Click** | File Row | Opens file preview |
+| **Left Click** | Tab Header | Switches to clicked tab |
+| **Left Click** | Terminal Panel | Focuses interactive terminal |
+| **Mouse Wheel** | File Pane | Scrolls file list |
+| **Mouse Wheel** | Terminal Panel | Scrolls terminal scrollback |
 
 ---
 
-## Configuration & Storage
+## 🔒 Security & Architecture
 
-TerminalVision stores bookmarks and configuration in standard platform directories without touching your project trees:
-- **macOS / Linux**: `~/.config/terminalvision/bookmarks.json`
-- **Windows**: `%APPDATA%\terminalvision\bookmarks.json`
-
----
-
-## Troubleshooting
-
-- **`terminalvision` command not found**: Ensure your Cargo binary directory (`$HOME/.cargo/bin` or `%USERPROFILE%\.cargo\bin`) is added to your environment `PATH`.
-- **Unicode / Box Drawing Characters**: Verify that your terminal emulator is configured with a modern Unicode font (e.g., FiraCode, JetBrains Mono, Hack, Cascadia Code).
-- **Small Terminal Window**: TerminalVision dynamically adapts down to minimal sizes; resize your terminal window to 80x24 or larger for optimal dual-pane viewing.
-- **Git Status Not Detected**: TerminalVision reads `.git` directories and worktree pointer files directly. Ensure your user account has read permissions for `.git` metadata.
+1. **Zero Shell Injection in File Manager**: File operations (`create`, `rename`, `copy`, `delete`) execute exclusively via safe Rust standard library `std::fs` calls.
+2. **Explicit Terminal Execution Only**: Shell commands execute strictly through the PTY when explicitly typed by the user in the focused terminal panel.
+3. **No Background Execution**: Selecting, highlighting, or previewing files never executes scripts or binaries.
+4. **ANSI Sanitization**: Preview text sanitizes escape codes to prevent terminal control exploits.
+5. **Bounded Resource Limits**: Previews enforce strict file size caps (max 1 MB) and line length limits.
 
 ---
 
-## Verification & Testing
+## 🛠️ Development & Quality Assurance
 
 ```bash
-# Run code formatting check
+# Code formatting
 cargo fmt --check
 
-# Run static type and borrow checks
+# Type checking
 cargo check
 
-# Run complete test suite (unit, integration, responsive, and performance tests)
+# Complete test suite (790+ unit, integration, and fuzz tests)
 cargo test
 
-# Run strict Clippy linter
+# Zero-warning Clippy verification
 cargo clippy --all-targets --all-features -- -D warnings
 
-# Build release bundle
+# Optimized release build
 cargo build --release
 ```
 
 ---
 
-## Security & Safety Architecture
+## 📄 License
 
-1. **Zero Shell Execution**: No subprocesses (`sh`, `bash`, `cmd.exe`, `cp`, `mv`, `rm`, `git`) are ever spawned. File management and Git parsing run purely in-process using native APIs.
-2. **No File Auto-Execution**: Highlighting, selecting, or opening files never executes scripts or binaries. Previews open strictly in read-only mode.
-3. **Bounded File Preview**: File preview reads are capped at a maximum 1 MB limit and truncated to line boundaries to prevent out-of-memory errors on massive files.
-4. **ANSI Sanitization**: Raw control sequences and terminal escape codes inside file contents are sanitized before rendering to prevent terminal hijacking.
-5. **Symlink Depth Protection**: Filesystem traversal enforces maximum recursion depth limits to prevent infinite loops caused by cyclic symlinks.
-6. **Non-Destructive Operations**: Copy and move operations perform destination checks to prevent silent file overwrites, prompting explicit user confirmation when conflicts arise.
-
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. Designed and maintained by [tace-x](https://github.com/tace-x).

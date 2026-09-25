@@ -24,6 +24,8 @@ pub enum ActionCategory {
     Git,
     /// Project root navigation and awareness.
     Project,
+    /// Integrated embedded terminal actions.
+    Terminal,
 }
 
 impl ActionCategory {
@@ -40,6 +42,7 @@ impl ActionCategory {
             Self::Bookmarks => "Bookmarks",
             Self::Git => "Git",
             Self::Project => "Project",
+            Self::Terminal => "Terminal",
         }
     }
 }
@@ -181,11 +184,28 @@ pub enum Action {
     ToggleFocusMode,
     /// Reveals the hierarchical context for the selected item (file -> dir -> project -> git).
     RevealContext,
+
+    /// Toggles input focus between the File Manager and the Embedded Terminal.
+    ToggleTerminalFocus,
+    /// Explicitly focuses the embedded interactive terminal.
+    FocusTerminal,
+    /// Explicitly focuses the file manager panes.
+    FocusFileManager,
+    /// Synchronizes the embedded terminal shell's directory to the active pane's directory.
+    SyncTerminalToDirectory,
+    /// Navigates the active pane to the embedded terminal's working directory.
+    SyncDirectoryToTerminal,
+    /// Scrolls the terminal scrollback history upward.
+    ScrollTerminalUp,
+    /// Scrolls the terminal scrollback history downward.
+    ScrollTerminalDown,
+    /// Refreshes the directory listing of the active pane.
+    RefreshDirectory,
 }
 
 impl Action {
     /// Every action, grouped by category.
-    pub const ALL: [Action; 58] = [
+    pub const ALL: [Action; 66] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveLeft,
@@ -224,6 +244,7 @@ impl Action {
         Action::InvertSelection,
         Action::ToggleHidden,
         Action::ChangeSort,
+        Action::RefreshDirectory,
         Action::FileRadar,
         Action::ToggleFocusMode,
         Action::Preview,
@@ -244,6 +265,13 @@ impl Action {
         Action::OpenReadme,
         Action::OpenLicense,
         Action::GoSourceDir,
+        Action::ToggleTerminalFocus,
+        Action::FocusTerminal,
+        Action::FocusFileManager,
+        Action::SyncTerminalToDirectory,
+        Action::SyncDirectoryToTerminal,
+        Action::ScrollTerminalUp,
+        Action::ScrollTerminalDown,
     ];
 
     /// What the action is about.
@@ -297,6 +325,7 @@ impl Action {
 
             Action::ToggleHidden
             | Action::ChangeSort
+            | Action::RefreshDirectory
             | Action::FileRadar
             | Action::ToggleFocusMode => ActionCategory::View,
 
@@ -313,6 +342,14 @@ impl Action {
             Action::AddBookmark | Action::OpenBookmarks | Action::RemoveBookmark => {
                 ActionCategory::Bookmarks
             }
+
+            Action::ToggleTerminalFocus
+            | Action::FocusTerminal
+            | Action::FocusFileManager
+            | Action::SyncTerminalToDirectory
+            | Action::SyncDirectoryToTerminal
+            | Action::ScrollTerminalUp
+            | Action::ScrollTerminalDown => ActionCategory::Terminal,
         }
     }
 }
@@ -323,7 +360,7 @@ mod tests {
     use crate::app::modes::Mode;
     use std::collections::{HashMap, HashSet};
 
-    fn categories() -> [ActionCategory; 10] {
+    fn categories() -> [ActionCategory; 11] {
         [
             ActionCategory::Navigation,
             ActionCategory::Tabs,
@@ -335,6 +372,7 @@ mod tests {
             ActionCategory::Bookmarks,
             ActionCategory::Git,
             ActionCategory::Project,
+            ActionCategory::Terminal,
         ]
     }
 
@@ -399,6 +437,14 @@ mod tests {
             Action::OpenReadme,
             Action::OpenLicense,
             Action::GoSourceDir,
+            Action::RefreshDirectory,
+            Action::ToggleTerminalFocus,
+            Action::FocusTerminal,
+            Action::FocusFileManager,
+            Action::SyncTerminalToDirectory,
+            Action::SyncDirectoryToTerminal,
+            Action::ScrollTerminalUp,
+            Action::ScrollTerminalDown,
         ];
 
         let mut required = required.to_vec();
@@ -446,13 +492,14 @@ mod tests {
             (ActionCategory::Navigation, 18),
             (ActionCategory::Tabs, 5),
             (ActionCategory::Files, 11),
-            (ActionCategory::View, 4),
+            (ActionCategory::View, 5),
             (ActionCategory::Preview, 1),
             (ActionCategory::Search, 3),
             (ActionCategory::Application, 4),
             (ActionCategory::Bookmarks, 3),
             (ActionCategory::Git, 3),
             (ActionCategory::Project, 6),
+            (ActionCategory::Terminal, 7),
         ];
 
         let total: usize = expected.iter().map(|(_, count)| count).sum();

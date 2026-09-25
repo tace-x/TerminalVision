@@ -44,20 +44,37 @@ fn run() -> io::Result<()> {
     install_panic_hook();
 
     let mut size = session.size()?;
-    
-    // Initialize visible rows based on initial size
+
+    // Initialize visible rows and embedded terminal based on initial size
     let layout = terminalvision::layout::geometry::ScreenLayout::calculate(size.area());
+    let term_rect = layout.terminal();
+    let term_cols = term_rect.width.saturating_sub(2).max(1);
+    let term_rows = term_rect.height.saturating_sub(2).max(1);
+    app.init_terminal(term_cols, term_rows);
+
     match layout.main() {
         terminalvision::layout::geometry::MainLayout::Single { pane } => {
             app.set_visible_rows(app.active_pane(), pane.height.saturating_sub(2) as usize);
         }
         terminalvision::layout::geometry::MainLayout::Two { left, right } => {
-            app.set_visible_rows(terminalvision::app::state::ActivePane::Left, left.height.saturating_sub(2) as usize);
-            app.set_visible_rows(terminalvision::app::state::ActivePane::Right, right.height.saturating_sub(2) as usize);
+            app.set_visible_rows(
+                terminalvision::app::state::ActivePane::Left,
+                left.height.saturating_sub(2) as usize,
+            );
+            app.set_visible_rows(
+                terminalvision::app::state::ActivePane::Right,
+                right.height.saturating_sub(2) as usize,
+            );
         }
         terminalvision::layout::geometry::MainLayout::Three { left, right, .. } => {
-            app.set_visible_rows(terminalvision::app::state::ActivePane::Left, left.height.saturating_sub(2) as usize);
-            app.set_visible_rows(terminalvision::app::state::ActivePane::Right, right.height.saturating_sub(2) as usize);
+            app.set_visible_rows(
+                terminalvision::app::state::ActivePane::Left,
+                left.height.saturating_sub(2) as usize,
+            );
+            app.set_visible_rows(
+                terminalvision::app::state::ActivePane::Right,
+                right.height.saturating_sub(2) as usize,
+            );
         }
     }
 
@@ -67,8 +84,14 @@ fn run() -> io::Result<()> {
     session.draw(&app)?;
 
     while !app.should_quit() {
+        let terminal_updated = app.terminal_poll_output();
+        if terminal_updated {
+            session.draw(&app)?;
+        }
+
         if let Some(event) = next_event(POLL_INTERVAL, app.mode())? {
             apply_input_event(&mut app, event, &mut size, &mut mouse_tracker);
+            let _ = app.terminal_poll_output();
             if !app.should_quit() {
                 session.draw(&app)?;
             }
@@ -244,6 +267,9 @@ fn apply_input_event(
                 app.set_confirm_selection(val);
             }
         }
+        InputEvent::TerminalKey(key) => {
+            app.terminal_send_key(key);
+        }
         InputEvent::Mouse(mouse) => {
             terminalvision::input::mouse::handle_mouse_event(
                 mouse,
@@ -256,17 +282,34 @@ fn apply_input_event(
         InputEvent::Resize(reported) => {
             *size = reported;
             let layout = terminalvision::layout::geometry::ScreenLayout::calculate(size.area());
+            let term_rect = layout.terminal();
+            let term_cols = term_rect.width.saturating_sub(2).max(1);
+            let term_rows = term_rect.height.saturating_sub(2).max(1);
+            app.terminal_resize(term_cols, term_rows);
+
             match layout.main() {
                 terminalvision::layout::geometry::MainLayout::Single { pane } => {
                     app.set_visible_rows(app.active_pane(), pane.height.saturating_sub(2) as usize);
                 }
                 terminalvision::layout::geometry::MainLayout::Two { left, right } => {
-                    app.set_visible_rows(terminalvision::app::state::ActivePane::Left, left.height.saturating_sub(2) as usize);
-                    app.set_visible_rows(terminalvision::app::state::ActivePane::Right, right.height.saturating_sub(2) as usize);
+                    app.set_visible_rows(
+                        terminalvision::app::state::ActivePane::Left,
+                        left.height.saturating_sub(2) as usize,
+                    );
+                    app.set_visible_rows(
+                        terminalvision::app::state::ActivePane::Right,
+                        right.height.saturating_sub(2) as usize,
+                    );
                 }
                 terminalvision::layout::geometry::MainLayout::Three { left, right, .. } => {
-                    app.set_visible_rows(terminalvision::app::state::ActivePane::Left, left.height.saturating_sub(2) as usize);
-                    app.set_visible_rows(terminalvision::app::state::ActivePane::Right, right.height.saturating_sub(2) as usize);
+                    app.set_visible_rows(
+                        terminalvision::app::state::ActivePane::Left,
+                        left.height.saturating_sub(2) as usize,
+                    );
+                    app.set_visible_rows(
+                        terminalvision::app::state::ActivePane::Right,
+                        right.height.saturating_sub(2) as usize,
+                    );
                 }
             }
         }
@@ -461,15 +504,25 @@ mod tests {
             TerminalSize::new(132, 43),
             "the reported size must be remembered exactly"
         );
-        let layout = terminalvision::layout::geometry::ScreenLayout::calculate(TerminalSize::new(132, 43).area());
-        if let terminalvision::layout::geometry::MainLayout::Three { left, right, .. } = layout.main() {
+        let layout = terminalvision::layout::geometry::ScreenLayout::calculate(
+            TerminalSize::new(132, 43).area(),
+        );
+        if let terminalvision::layout::geometry::MainLayout::Three { left, right, .. } =
+            layout.main()
+        {
             expected.set_visible_rows(ActivePane::Left, left.height.saturating_sub(2) as usize);
             expected.set_visible_rows(ActivePane::Right, right.height.saturating_sub(2) as usize);
-        } else if let terminalvision::layout::geometry::MainLayout::Two { left, right } = layout.main() {
+        } else if let terminalvision::layout::geometry::MainLayout::Two { left, right } =
+            layout.main()
+        {
             expected.set_visible_rows(ActivePane::Left, left.height.saturating_sub(2) as usize);
             expected.set_visible_rows(ActivePane::Right, right.height.saturating_sub(2) as usize);
-        } else if let terminalvision::layout::geometry::MainLayout::Single { pane } = layout.main() {
-            expected.set_visible_rows(expected.active_pane(), pane.height.saturating_sub(2) as usize);
+        } else if let terminalvision::layout::geometry::MainLayout::Single { pane } = layout.main()
+        {
+            expected.set_visible_rows(
+                expected.active_pane(),
+                pane.height.saturating_sub(2) as usize,
+            );
         }
 
         assert_eq!(

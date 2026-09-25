@@ -10,6 +10,7 @@ pub mod footer;
 pub mod header;
 pub mod panes;
 pub mod preview;
+pub mod terminal;
 pub mod theme;
 
 pub use theme::{NotificationLevel, Spacing, Symbols, Theme};
@@ -157,6 +158,11 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     panes::render(frame, layout.main(), app);
+
+    if layout.terminal().height > 0 && layout.terminal().width > 0 {
+        let is_terminal_focused = app.mode() == crate::app::modes::Mode::Terminal;
+        terminal::render(frame, layout.terminal(), app, is_terminal_focused);
+    }
 
     if layout.footer().height > 0 && layout.footer().width > 0 {
         footer::render(frame, layout.footer(), app);

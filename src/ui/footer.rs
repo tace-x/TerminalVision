@@ -32,6 +32,7 @@ pub fn mode_display(mode: Mode) -> &'static str {
         Mode::GitStatusPanel => "GIT STATUS",
         Mode::FileRadar => "FILE RADAR",
         Mode::RevealContext => "CONTEXT",
+        Mode::Terminal => "TERMINAL",
     }
 }
 

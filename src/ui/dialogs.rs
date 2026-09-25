@@ -405,6 +405,7 @@ fn render_command_palette(frame: &mut Frame, area: Rect, app: &App) {
                 crate::app::actions::ActionCategory::Preview => "[PREV]",
                 crate::app::actions::ActionCategory::Git => "[GIT]",
                 crate::app::actions::ActionCategory::Project => "[PROJ]",
+                crate::app::actions::ActionCategory::Terminal => "[TERM]",
                 crate::app::actions::ActionCategory::Application => "[APP]",
             };
 

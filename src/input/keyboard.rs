@@ -24,8 +24,17 @@ pub fn map_key(key: KeyEvent, mode: Mode) -> Option<Action> {
         return None;
     }
 
-    // Ctrl+C is an unconditional quit request across all modes.
-    if is_quit_request(key) {
+    // Ctrl+T or F12 always toggles terminal focus across all modes!
+    if (key.modifiers.contains(KeyModifiers::CONTROL)
+        && (key.code == KeyCode::Char('t') || key.code == KeyCode::Char('T')))
+        || key.code == KeyCode::F(12)
+    {
+        return Some(Action::ToggleTerminalFocus);
+    }
+
+    // Ctrl+C in Normal or Modal mode is a quit request.
+    // In Terminal mode, Ctrl+C is passed to the PTY shell as SIGINT.
+    if mode != Mode::Terminal && is_quit_request(key) {
         return Some(Action::Quit);
     }
 
@@ -34,6 +43,11 @@ pub fn map_key(key: KeyEvent, mode: Mode) -> Option<Action> {
         && (key.code == KeyCode::Char('p') || key.code == KeyCode::Char('P'))
     {
         return Some(Action::CommandPalette);
+    }
+
+    // In Terminal mode, all other keys go to PTY shell
+    if mode == Mode::Terminal {
+        return None;
     }
 
     // Ctrl+A in Normal mode selects all entries.
@@ -68,6 +82,7 @@ pub fn map_key(key: KeyEvent, mode: Mode) -> Option<Action> {
 
     match mode {
         Mode::Normal => map_normal_key(key),
+        Mode::Terminal => None,
         Mode::Search => map_search_action(key),
         Mode::Preview | Mode::Help => map_overlay_key(key),
         Mode::Rename
@@ -186,6 +201,10 @@ pub fn map_key_event(key: KeyEvent, mode: Mode) -> InputEvent {
 
     if let Some(action) = map_key(key, mode) {
         return InputEvent::Action(action);
+    }
+
+    if mode == Mode::Terminal {
+        return InputEvent::TerminalKey(key);
     }
 
     let has_ctrl_or_alt =

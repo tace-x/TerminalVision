@@ -52,6 +52,8 @@ pub enum InputEvent {
     ModalToggle,
     /// Explicitly choose Yes or No in a confirmation dialog.
     ModalSetConfirm(bool),
+    /// A key event directed to the interactive terminal shell.
+    TerminalKey(crossterm::event::KeyEvent),
     /// A mouse event reported by the terminal.
     Mouse(crossterm::event::MouseEvent),
     /// The terminal was resized, carrying the size the terminal reported.

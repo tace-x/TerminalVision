@@ -6,10 +6,12 @@
 //!
 //! This module is independent of terminal rendering, Crossterm, and Ratatui.
 
+pub mod image;
 pub mod language;
 pub mod metadata;
 pub mod syntax;
 
+pub use image::{ImageFormat, ImagePreview};
 pub use language::Language;
 pub use metadata::{MetadataPreview, format_size, format_system_time, load_metadata_preview};
 pub use syntax::{StyledSpan, TokenKind, tokenize_line};
@@ -107,6 +109,8 @@ pub enum PreviewContent {
     Text(TextPreview),
     /// A structured metadata preview (for directories, symlinks, binary/unsupported files).
     Metadata(MetadataPreview),
+    /// A structured image file preview.
+    Image(ImagePreview),
     /// The file extension is not supported for text preview.
     UnsupportedExtension(String),
     /// The file contains binary content (e.g., null bytes).
@@ -127,6 +131,19 @@ impl PreviewContent {
     pub fn as_text(&self) -> Option<&TextPreview> {
         match self {
             Self::Text(preview) => Some(preview),
+            _ => None,
+        }
+    }
+
+    /// Whether the preview represents an image.
+    pub fn is_image(&self) -> bool {
+        matches!(self, Self::Image(_))
+    }
+
+    /// Returns the image preview if available.
+    pub fn as_image(&self) -> Option<&ImagePreview> {
+        match self {
+            Self::Image(preview) => Some(preview),
             _ => None,
         }
     }
@@ -264,10 +281,20 @@ pub fn load_preview(path: &Path) -> PreviewContent {
     let language = Language::from_path(path);
 
     // Check extension if present.
-    if let Some(ext) = path.extension().and_then(|s| s.to_str())
-        && !is_supported_text_extension(ext)
-    {
-        return PreviewContent::UnsupportedExtension(ext.to_string());
+    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+        let ext_lower = ext.to_ascii_lowercase();
+        if matches!(
+            ext_lower.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+        ) {
+            return match ImagePreview::from_path(path) {
+                Ok(img) => PreviewContent::Image(img),
+                Err(err) => PreviewContent::Error(err),
+            };
+        }
+        if !is_supported_text_extension(ext) {
+            return PreviewContent::UnsupportedExtension(ext.to_string());
+        }
     }
 
     let mut file = match File::open(path) {
@@ -419,13 +446,13 @@ mod tests {
     #[test]
     fn test_8_unsupported_extension() {
         let temp = TempDir::new("preview-unsupported");
-        let file = temp.path().join("image.png");
-        fs::write(&file, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+        let file = temp.path().join("archive.xyz");
+        fs::write(&file, b"some unsupported format data").unwrap();
 
         let preview = load_preview(&file);
         assert_eq!(
             preview,
-            PreviewContent::UnsupportedExtension("png".to_string())
+            PreviewContent::UnsupportedExtension("xyz".to_string())
         );
     }
 

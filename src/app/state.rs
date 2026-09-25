@@ -2418,6 +2418,26 @@ pub enum CreateKind {
     Directory,
 }
 
+/// Thread-safe wrapper for the embedded terminal session.
+#[derive(Clone, Default)]
+pub struct AppTerminal(
+    pub std::sync::Arc<std::sync::Mutex<Option<crate::terminal::TerminalSession>>>,
+);
+
+impl std::fmt::Debug for AppTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AppTerminal")
+    }
+}
+
+impl PartialEq for AppTerminal {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for AppTerminal {}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct App {
     left: Pane,
@@ -2445,6 +2465,7 @@ pub struct App {
     confirm_selection: bool,
     palette: CommandPaletteState,
     focus_mode: bool,
+    terminal: AppTerminal,
 }
 
 impl App {
@@ -2501,6 +2522,156 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Initializes the integrated terminal session at the active directory.
+    pub fn init_terminal(&self, cols: u16, rows: u16) {
+        let cwd = self.pane(self.active_pane).current_path();
+        if let Ok(term) = crate::terminal::TerminalSession::start(cwd, cols, rows)
+            && let Ok(mut guard) = self.terminal.0.lock()
+        {
+            *guard = Some(term);
+        }
+    }
+
+    /// Polls pending PTY output into the terminal emulator.
+    pub fn terminal_poll_output(&self) -> bool {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            return term.poll_output();
+        }
+        false
+    }
+
+    /// Sends a key event to the interactive terminal shell.
+    pub fn terminal_send_key(&self, key: crossterm::event::KeyEvent) {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            let _ = term.send_key(key);
+        }
+    }
+
+    /// Sends raw byte input to the interactive terminal shell.
+    pub fn terminal_send_bytes(&self, bytes: &[u8]) {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            let _ = term.write_bytes(bytes);
+        }
+    }
+
+    /// Resizes the interactive terminal session.
+    pub fn terminal_resize(&self, cols: u16, rows: u16) {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            term.resize(cols, rows);
+        }
+    }
+
+    /// Returns snapshot of visible rows of the terminal screen.
+    pub fn terminal_visible_rows(&self) -> Vec<Vec<crate::terminal::Cell>> {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            return term.visible_rows();
+        }
+        Vec::new()
+    }
+
+    /// Returns the cursor row, column, and visibility state.
+    pub fn terminal_cursor_info(&self) -> (u16, u16, bool) {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            return term.cursor_info();
+        }
+        (0, 0, false)
+    }
+
+    /// Returns the active shell executable name.
+    pub fn terminal_shell_name(&self) -> String {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            return term.shell_name().to_string();
+        }
+        "shell".to_string()
+    }
+
+    /// Returns the terminal's tracked or initial working directory.
+    pub fn terminal_cwd(&self) -> PathBuf {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            return term.current_path();
+        }
+        self.pane(self.active_pane).current_path().clone()
+    }
+
+    /// Scrolls terminal scrollback history upward.
+    pub fn terminal_scroll_up(&self, count: usize) {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            term.scroll_up(count);
+        }
+    }
+
+    /// Scrolls terminal scrollback history downward.
+    pub fn terminal_scroll_down(&self, count: usize) {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            term.scroll_down(count);
+        }
+    }
+
+    /// Resets terminal scrollback to live view.
+    pub fn terminal_reset_scroll(&self) {
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            term.reset_scroll();
+        }
+    }
+
+    /// Synchronizes the terminal shell's directory to the active pane's path.
+    pub fn sync_terminal_to_directory(&self) {
+        let path = self.pane(self.active_pane).current_path();
+        if let Ok(guard) = self.terminal.0.lock()
+            && let Some(term) = guard.as_ref()
+        {
+            let _ = term.cd_to_path(path);
+        }
+    }
+
+    /// Synchronizes the active pane to the terminal shell's current working directory.
+    pub fn sync_directory_to_terminal(&mut self) {
+        let term_cwd = self.terminal_cwd();
+        if term_cwd.exists() && term_cwd.is_dir() {
+            let active = self.active_pane;
+            let _ = self.open_in(active, term_cwd);
+        }
+    }
+
+    /// Refreshes the directory listing of both panes without losing position.
+    pub fn refresh_directory(&mut self) {
+        let left_path = self.left.current_path().clone();
+        if let Ok(entries) = self.filesystem.list_directory(&left_path) {
+            let sel = self.left.selected_index().unwrap_or(0);
+            self.left.set_entries(entries);
+            self.left.select(sel);
+        }
+        let right_path = self.right.current_path().clone();
+        if let Ok(entries) = self.filesystem.list_directory(&right_path) {
+            let sel = self.right.selected_index().unwrap_or(0);
+            self.right.set_entries(entries);
+            self.right.select(sel);
+        }
+        self.refresh_preview();
     }
 
     /// Navigates back one step in the active tab's history.\
@@ -3042,6 +3213,49 @@ impl App {
                 self.remove_selected_bookmark();
             }
 
+            Action::ToggleTerminalFocus
+                if self.mode == Mode::Normal || self.mode == Mode::Terminal =>
+            {
+                if self.mode == Mode::Terminal {
+                    self.mode = Mode::Normal;
+                } else {
+                    self.mode = Mode::Terminal;
+                }
+            }
+            Action::FocusTerminal if self.mode == Mode::Normal || self.mode == Mode::Terminal => {
+                self.mode = Mode::Terminal;
+            }
+            Action::FocusFileManager
+                if self.mode == Mode::Normal || self.mode == Mode::Terminal =>
+            {
+                self.mode = Mode::Normal;
+            }
+            Action::ScrollTerminalUp
+                if self.mode == Mode::Normal || self.mode == Mode::Terminal =>
+            {
+                self.terminal_scroll_up(5);
+            }
+            Action::ScrollTerminalDown
+                if self.mode == Mode::Normal || self.mode == Mode::Terminal =>
+            {
+                self.terminal_scroll_down(5);
+            }
+            Action::SyncTerminalToDirectory
+                if self.mode == Mode::Normal || self.mode == Mode::Terminal =>
+            {
+                self.sync_terminal_to_directory();
+            }
+            Action::SyncDirectoryToTerminal
+                if self.mode == Mode::Normal || self.mode == Mode::Terminal =>
+            {
+                self.sync_directory_to_terminal();
+            }
+            Action::RefreshDirectory
+                if self.mode == Mode::Normal || self.mode == Mode::Terminal =>
+            {
+                self.refresh_directory();
+            }
+
             _ if self.mode == Mode::Normal => self.handle_normal_action(action),
 
             // Not valid in the active mode. Ignoring the action keeps the state
@@ -3298,6 +3512,36 @@ impl App {
             }
             Action::ToggleFocusMode => {
                 self.toggle_focus_mode();
+            }
+            Action::ToggleTerminalFocus => {
+                if self.mode == Mode::Terminal {
+                    self.mode = Mode::Normal;
+                } else {
+                    self.mode = Mode::Terminal;
+                }
+            }
+            Action::FocusTerminal => {
+                self.mode = Mode::Terminal;
+            }
+            Action::FocusFileManager => {
+                if self.mode == Mode::Terminal {
+                    self.mode = Mode::Normal;
+                }
+            }
+            Action::SyncTerminalToDirectory => {
+                self.sync_terminal_to_directory();
+            }
+            Action::SyncDirectoryToTerminal => {
+                self.sync_directory_to_terminal();
+            }
+            Action::ScrollTerminalUp => {
+                self.terminal_scroll_up(3);
+            }
+            Action::ScrollTerminalDown => {
+                self.terminal_scroll_down(3);
+            }
+            Action::RefreshDirectory => {
+                self.refresh_directory();
             }
 
             // Handled before this point; listed so that the match stays

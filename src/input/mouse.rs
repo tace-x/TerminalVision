@@ -175,9 +175,12 @@ pub fn handle_mouse_event_at(
     tracker: &mut MouseTracker,
     now: Instant,
 ) {
-    if app.mode() != Mode::Normal {
+    if app.mode() != Mode::Normal && app.mode() != Mode::Terminal {
         return;
     }
+
+    let layout = ScreenLayout::calculate(terminal_area);
+    let term_rect = layout.terminal();
 
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -185,6 +188,10 @@ pub fn handle_mouse_event_at(
             if let Some((pane, pane_rect)) =
                 hit_test_pane(event.column, event.row, terminal_area, active)
             {
+                if app.mode() == Mode::Terminal {
+                    app.handle_action(Action::FocusFileManager);
+                }
+
                 let scroll_offset = app.pane(pane).scroll_offset();
                 let total_count = app.pane(pane).visible_count();
 
@@ -229,6 +236,9 @@ pub fn handle_mouse_event_at(
                     tracker.clear();
                     app.set_active_pane(pane);
                 }
+            } else if contains(term_rect, event.column, event.row) {
+                tracker.clear();
+                app.handle_action(Action::FocusTerminal);
             } else {
                 // Clicked outside pane (header, footer, preview, separator)
                 tracker.clear();
@@ -241,6 +251,9 @@ pub fn handle_mouse_event_at(
             if let Some((pane, pane_rect)) =
                 hit_test_pane(event.column, event.row, terminal_area, active)
             {
+                if app.mode() == Mode::Terminal {
+                    app.handle_action(Action::FocusFileManager);
+                }
                 let scroll_offset = app.pane(pane).scroll_offset();
                 let total_count = app.pane(pane).visible_count();
 
@@ -255,23 +268,43 @@ pub fn handle_mouse_event_at(
                 } else {
                     app.set_active_pane(pane);
                 }
+            } else if contains(term_rect, event.column, event.row) {
+                app.handle_action(Action::FocusTerminal);
             }
         }
 
         MouseEventKind::ScrollUp => {
-            let active = app.active_pane();
-            if let Some((pane, _)) = hit_test_pane(event.column, event.row, terminal_area, active) {
-                app.set_active_pane(pane);
+            if contains(term_rect, event.column, event.row) {
+                app.handle_action(Action::ScrollTerminalUp);
+            } else {
+                let active = app.active_pane();
+                if let Some((pane, _)) =
+                    hit_test_pane(event.column, event.row, terminal_area, active)
+                {
+                    if app.mode() == Mode::Terminal {
+                        app.handle_action(Action::FocusFileManager);
+                    }
+                    app.set_active_pane(pane);
+                }
+                app.handle_action(Action::MoveUp);
             }
-            app.handle_action(Action::MoveUp);
         }
 
         MouseEventKind::ScrollDown => {
-            let active = app.active_pane();
-            if let Some((pane, _)) = hit_test_pane(event.column, event.row, terminal_area, active) {
-                app.set_active_pane(pane);
+            if contains(term_rect, event.column, event.row) {
+                app.handle_action(Action::ScrollTerminalDown);
+            } else {
+                let active = app.active_pane();
+                if let Some((pane, _)) =
+                    hit_test_pane(event.column, event.row, terminal_area, active)
+                {
+                    if app.mode() == Mode::Terminal {
+                        app.handle_action(Action::FocusFileManager);
+                    }
+                    app.set_active_pane(pane);
+                }
+                app.handle_action(Action::MoveDown);
             }
-            app.handle_action(Action::MoveDown);
         }
 
         _ => {
@@ -340,7 +373,7 @@ mod tests {
         assert!(hit.is_some());
         let (pane, rect) = hit.unwrap();
         assert_eq!(pane, ActivePane::Left);
-        assert_eq!(rect, Rect::new(0, 1, 60, 22));
+        assert_eq!(rect, Rect::new(0, 1, 60, 15));
 
         // Click on header
         assert!(hit_test_pane(10, 0, area, ActivePane::Left).is_none());

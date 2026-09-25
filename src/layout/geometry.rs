@@ -55,6 +55,8 @@ pub enum Region {
     RightPane,
     /// The preview beside the panes, on wide terminals.
     Preview,
+    /// The integrated interactive terminal panel.
+    Terminal,
     /// The bar across the bottom.
     Footer,
 }
@@ -279,6 +281,7 @@ impl MainLayout {
 pub struct ScreenLayout {
     header: Rect,
     main: MainLayout,
+    terminal: Rect,
     footer: Rect,
     mode: LayoutMode,
     tier: ResponsiveTier,
@@ -287,30 +290,44 @@ pub struct ScreenLayout {
 impl ScreenLayout {
     /// Derives every region from the terminal area.
     ///
-    /// The height is granted in order: the header, then the footer, and the
-    /// main content takes the remainder. On a terminal too short for all three,
-    /// the main content shrinks to nothing rather than the regions overflowing,
-    /// and on a terminal of no height at all every region is empty. No input
-    /// produces a rectangle outside `area`, or a panic.
+    /// The height is granted in order: the header, then the footer. The remaining
+    /// height is responsively divided between the file manager panes and the
+    /// integrated interactive terminal panel.
     pub fn calculate(area: Rect) -> Self {
         let tier = ResponsiveTier::calculate(area);
         let header_height = HEADER_HEIGHT.min(area.height);
         let footer_height = FOOTER_HEIGHT.min(area.height.saturating_sub(header_height));
-        let main_height = area
+        let avail_height = area
             .height
             .saturating_sub(header_height.saturating_add(footer_height));
+
+        let (main_height, terminal_height) = if avail_height == 0 {
+            (0, 0)
+        } else if avail_height <= 6 {
+            let term = (avail_height / 2).max(1);
+            (avail_height.saturating_sub(term), term)
+        } else {
+            let max_term = avail_height.saturating_sub(3);
+            let min_term = 3.min(max_term);
+            let term = (((avail_height as u32 * 35) / 100) as u16).clamp(min_term, max_term);
+            (avail_height.saturating_sub(term), term)
+        };
 
         let header = Rect::new(area.x, area.y, area.width, header_height);
 
         let main_y = area.y.saturating_add(header_height);
         let main_area = Rect::new(area.x, main_y, area.width, main_height);
 
-        let footer_y = main_y.saturating_add(main_height);
+        let term_y = main_y.saturating_add(main_height);
+        let terminal = Rect::new(area.x, term_y, area.width, terminal_height);
+
+        let footer_y = term_y.saturating_add(terminal_height);
         let footer = Rect::new(area.x, footer_y, area.width, footer_height);
 
         Self {
             header,
             main: MainLayout::of(main_area, tier),
+            terminal,
             footer,
             mode: tier.layout_mode(),
             tier,
@@ -327,6 +344,11 @@ impl ScreenLayout {
         self.main
     }
 
+    /// The integrated terminal region.
+    pub fn terminal(&self) -> Rect {
+        self.terminal
+    }
+
     /// The footer region.
     pub fn footer(&self) -> Rect {
         self.footer
@@ -339,7 +361,7 @@ impl ScreenLayout {
 
     /// The height the terminal had when this layout was calculated.
     pub fn height(&self) -> u16 {
-        self.header.height + self.main.area().height + self.footer.height
+        self.header.height + self.main.area().height + self.terminal.height + self.footer.height
     }
 
     /// The layout mode selected by the area.
@@ -354,9 +376,10 @@ impl ScreenLayout {
 
     /// Every region of the interface, from top to bottom and left to right.
     pub fn regions(&self) -> Vec<(Region, Rect)> {
-        let mut regions = Vec::with_capacity(2 + self.mode.region_count());
+        let mut regions = Vec::with_capacity(3 + self.mode.region_count());
         regions.push((Region::Header, self.header));
         regions.extend(self.main.regions());
+        regions.push((Region::Terminal, self.terminal));
         regions.push((Region::Footer, self.footer));
         regions
     }
@@ -435,6 +458,7 @@ mod tests {
             Region::LeftPane => "left pane",
             Region::RightPane => "right pane",
             Region::Preview => "preview",
+            Region::Terminal => "terminal",
             Region::Footer => "footer",
         }
     }
@@ -508,10 +532,11 @@ mod tests {
     fn assert_height_conservation(area: Rect, layout: &ScreenLayout) {
         let header = layout.header().height;
         let main = layout.main().area().height;
+        let terminal = layout.terminal().height;
         let footer = layout.footer().height;
 
         assert_eq!(
-            u32::from(header) + u32::from(main) + u32::from(footer),
+            u32::from(header) + u32::from(main) + u32::from(terminal) + u32::from(footer),
             u32::from(area.height),
             "the stacked heights must add up to the available height"
         );
@@ -564,12 +589,14 @@ mod tests {
             &[
                 ("header", layout.header()),
                 ("main", main_area),
+                ("terminal", layout.terminal()),
                 ("footer", layout.footer()),
             ],
             area.height,
         );
         assert_eq!(layout.header().width, area.width);
         assert_eq!(main_area.width, area.width);
+        assert_eq!(layout.terminal().width, area.width);
         assert_eq!(layout.footer().width, area.width);
 
         let main_regions = layout.main().regions();

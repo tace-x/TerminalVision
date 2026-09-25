@@ -34,6 +34,8 @@ pub enum Mode {
     FileRadar,
     /// Revealing hierarchical path context (file -> parent -> project -> git repo).
     RevealContext,
+    /// Interacting with the integrated embedded terminal shell.
+    Terminal,
 }
 
 #[cfg(test)]
@@ -63,6 +65,7 @@ mod tests {
             Mode::GitStatusPanel,
             Mode::FileRadar,
             Mode::RevealContext,
+            Mode::Terminal,
         ];
 
         for (index, mode) in modes.iter().enumerate() {

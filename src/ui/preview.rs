@@ -62,9 +62,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         Some(PreviewContent::Text(text_preview)) => {
             render_text_preview(frame, inner, text_preview);
         }
+        Some(PreviewContent::Image(image_preview)) => {
+            render_image_preview(frame, inner, image_preview);
+        }
         Some(PreviewContent::Metadata(metadata_preview)) => {
             render_metadata_preview(frame, inner, metadata_preview);
         }
+
         Some(PreviewContent::Directory) => {
             let message = Paragraph::new("[Directory]")
                 .alignment(Alignment::Center)
@@ -336,6 +340,87 @@ fn render_text_preview(frame: &mut Frame, area: Rect, preview: &crate::preview::
     }
 
     let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, area);
+}
+
+/// Renders structured image preview metadata and formatted dimensions card.
+fn render_image_preview(frame: &mut Frame, area: Rect, img: &crate::preview::ImagePreview) {
+    let theme = Theme::default();
+    let total_width = area.width as usize;
+    let max_rows = area.height as usize;
+
+    let mut lines = Vec::new();
+
+    // Header badge
+    let header_badge = format!(" [IMAGE: {}] ", img.format.short_name());
+    lines.push(Line::from(vec![Span::styled(
+        header_badge,
+        theme
+            .tab_active_focused
+            .bg(ratatui::style::Color::Magenta)
+            .fg(ratatui::style::Color::White),
+    )]));
+    lines.push(Line::default());
+
+    // Details
+    let size_str = crate::preview::format_size(img.file_size);
+    let dims_str = if img.width > 0 && img.height > 0 {
+        format!("{} × {} px", img.width, img.height)
+    } else {
+        "Unknown (header unread)".into()
+    };
+    let ratio_str = img.aspect_ratio_str();
+
+    let fields = [
+        (
+            "Format",
+            img.format.display_name(),
+            theme.preview_metadata_value,
+        ),
+        ("Dimensions", &dims_str, theme.header_path),
+        ("Aspect Ratio", &ratio_str, theme.preview_metadata_label),
+        ("Color Model", &img.color_info, theme.preview_metadata_value),
+        ("File Size", &size_str, theme.header_path),
+    ];
+
+    for (label, val, val_style) in fields {
+        if lines.len() >= max_rows {
+            break;
+        }
+        let label_fmt = format!("{:<14} ", format!("{label}:"));
+        let line = Line::from(vec![
+            Span::styled(label_fmt, theme.preview_metadata_label),
+            Span::styled(val.to_string(), val_style),
+        ]);
+        lines.push(line);
+    }
+
+    // Visual aspect ratio framing if vertical room permits
+    if max_rows > lines.len() + 4 && total_width > 20 && img.width > 0 && img.height > 0 {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "┌ Visual Canvas Framing ─────────────────┐",
+            theme.preview_border,
+        )));
+        let frame_w = total_width.min(36).saturating_sub(4);
+        let frame_h = (max_rows.saturating_sub(lines.len() + 2)).min(6);
+        for row in 0..frame_h {
+            let row_str = if row == frame_h / 2 {
+                let mid_label = format!("  {}  ", dims_str);
+                let pad = frame_w.saturating_sub(mid_label.len()) / 2;
+                format!("│{:pad$}{mid_label}{:pad$}│", "", "", pad = pad)
+            } else {
+                format!("│{:width$}│", "", width = frame_w)
+            };
+            lines.push(Line::from(Span::styled(row_str, theme.preview_muted)));
+        }
+        lines.push(Line::from(Span::styled(
+            "└────────────────────────────────────────┘",
+            theme.preview_border,
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines.into_iter().take(max_rows).collect::<Vec<_>>());
     frame.render_widget(paragraph, area);
 }
 

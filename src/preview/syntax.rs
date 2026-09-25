@@ -175,7 +175,11 @@ pub fn tokenize_line<'a>(line: &'a str, language: Language) -> Vec<StyledSpan<'a
 
         // 6. Punctuation / other symbols
         let start = cursor;
-        let char_len = line[cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        let char_len = line[cursor..]
+            .chars()
+            .next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
         cursor += char_len;
         spans.push(StyledSpan {
             text: &line[start..cursor],

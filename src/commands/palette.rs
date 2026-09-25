@@ -424,6 +424,63 @@ impl Command {
             ActionCategory::Project,
             None,
         ),
+        Command::new(
+            "Refresh Directory",
+            "Refresh listing of the active directory",
+            Action::RefreshDirectory,
+            ActionCategory::View,
+            Some("r / F5"),
+        ),
+        // TERMINAL
+        Command::new(
+            "Toggle Terminal Focus",
+            "Switch focus between File Manager and Terminal",
+            Action::ToggleTerminalFocus,
+            ActionCategory::Terminal,
+            Some("Ctrl+T"),
+        ),
+        Command::new(
+            "Focus Terminal",
+            "Switch keyboard focus to embedded interactive terminal",
+            Action::FocusTerminal,
+            ActionCategory::Terminal,
+            Some("Ctrl+T"),
+        ),
+        Command::new(
+            "Focus File Manager",
+            "Switch keyboard focus to file manager panes",
+            Action::FocusFileManager,
+            ActionCategory::Terminal,
+            Some("Ctrl+T"),
+        ),
+        Command::new(
+            "Sync Terminal to Directory",
+            "Change embedded terminal shell directory to active file pane",
+            Action::SyncTerminalToDirectory,
+            ActionCategory::Terminal,
+            None,
+        ),
+        Command::new(
+            "Sync Directory to Terminal",
+            "Navigate file manager active pane to terminal working directory",
+            Action::SyncDirectoryToTerminal,
+            ActionCategory::Terminal,
+            None,
+        ),
+        Command::new(
+            "Scroll Terminal Up",
+            "Scroll terminal scrollback history upward",
+            Action::ScrollTerminalUp,
+            ActionCategory::Terminal,
+            None,
+        ),
+        Command::new(
+            "Scroll Terminal Down",
+            "Scroll terminal scrollback history downward",
+            Action::ScrollTerminalDown,
+            ActionCategory::Terminal,
+            None,
+        ),
         // APPLICATION
         Command::new(
             "Command Palette",

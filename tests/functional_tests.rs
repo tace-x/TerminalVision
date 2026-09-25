@@ -344,3 +344,221 @@ fn test_sorting_and_hidden_files_toggles() {
     let new_sort = app.pane(ActivePane::Left).sort_mode();
     assert_ne!(initial_sort, new_sort);
 }
+
+#[test]
+fn test_integrated_terminal_lifecycle_and_focus_switching() {
+    let temp = TempDir::new("tv-term-lifecycle");
+    let mut app = App::at(temp.path().to_path_buf()).unwrap();
+
+    // Initialize terminal with dimensions 80x20
+    app.init_terminal(80, 20);
+
+    // Initial state: Mode::Normal
+    assert_eq!(app.mode(), Mode::Normal);
+
+    // Toggle focus to Terminal
+    app.handle_action(Action::ToggleTerminalFocus);
+    assert_eq!(app.mode(), Mode::Terminal);
+
+    // Send key to terminal (e.g. echo hello)
+    app.terminal_send_bytes(b"echo hello\n");
+
+    // Scroll terminal scrollback
+    app.handle_action(Action::ScrollTerminalUp);
+    app.handle_action(Action::ScrollTerminalDown);
+    app.terminal_reset_scroll();
+
+    // Resize terminal
+    app.terminal_resize(120, 30);
+    assert!(!app.terminal_shell_name().is_empty());
+
+    // Switch focus back to File Manager
+    app.handle_action(Action::FocusFileManager);
+    assert_eq!(app.mode(), Mode::Normal);
+
+    // Explicitly focus terminal
+    app.handle_action(Action::FocusTerminal);
+    assert_eq!(app.mode(), Mode::Terminal);
+
+    // Toggle back to Normal
+    app.handle_action(Action::ToggleTerminalFocus);
+    assert_eq!(app.mode(), Mode::Normal);
+}
+
+#[test]
+fn test_terminal_file_manager_directory_synchronization() {
+    let temp = TempDir::new("tv-term-sync");
+    let sub = temp.path().join("sub_folder");
+    fs::create_dir(&sub).unwrap();
+
+    let mut app = App::at(temp.path().to_path_buf()).unwrap();
+    app.init_terminal(80, 20);
+
+    // 1. Sync Terminal to Active Pane Directory
+    app.handle_action(Action::SyncTerminalToDirectory);
+
+    // 2. Simulate new file created in terminal
+    let new_file = temp.path().join("from_terminal.txt");
+    fs::write(&new_file, b"created via terminal command").unwrap();
+
+    // Refresh directory
+    app.handle_action(Action::RefreshDirectory);
+    assert!(
+        app.pane(ActivePane::Left)
+            .entries()
+            .iter()
+            .any(|e| e.name() == "from_terminal.txt")
+    );
+
+    // 3. Sync Directory to Terminal
+    app.handle_action(Action::SyncDirectoryToTerminal);
+    assert!(app.pane(ActivePane::Left).current_path().exists());
+}
+
+#[test]
+fn test_image_preview_decoding_and_metadata() {
+    use terminalvision::preview::image::ImageFormat;
+    use terminalvision::preview::{PreviewContent, load_preview};
+
+    let temp = TempDir::new("tv-image-preview");
+
+    // 1. PNG Image with valid header & IHDR chunk (32x16, 8-bit RGBA)
+    let png_path = temp.path().join("test.png");
+    let mut png_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG Signature
+    // IHDR chunk: Length (13), "IHDR", Width (32), Height (16), Depth (8), ColorType (6 = RGBA), Compression (0), Filter (0), Interlace (0), CRC
+    png_data.extend_from_slice(&[
+        0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R', 0x00, 0x00, 0x00, 0x20, // 32
+        0x00, 0x00, 0x00, 0x10, // 16
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+    fs::write(&png_path, &png_data).unwrap();
+
+    let preview = load_preview(&png_path);
+    if let PreviewContent::Image(img) = preview {
+        assert_eq!(img.format, ImageFormat::Png);
+        assert_eq!(img.width, 32);
+        assert_eq!(img.height, 16);
+        assert_eq!(img.aspect_ratio_str(), "2.00:1 (32×16)");
+    } else {
+        panic!("expected PreviewContent::Image for PNG, got {preview:?}");
+    }
+
+    // 2. GIF Image (800x600, GIF89a)
+    let gif_path = temp.path().join("anim.gif");
+    let mut gif_data = b"GIF89a".to_vec();
+    gif_data.extend_from_slice(&[0x20, 0x03, 0x58, 0x02, 0x80, 0x00, 0x00]); // width: 800, height: 600
+    fs::write(&gif_path, &gif_data).unwrap();
+
+    let preview = load_preview(&gif_path);
+    if let PreviewContent::Image(img) = preview {
+        assert_eq!(img.format, ImageFormat::Gif);
+        assert_eq!(img.width, 800);
+        assert_eq!(img.height, 600);
+        assert_eq!(img.aspect_ratio_str(), "4:3");
+    } else {
+        panic!("expected PreviewContent::Image for GIF, got {preview:?}");
+    }
+
+    // 3. BMP Image (1920x1080, BM header)
+    let bmp_path = temp.path().join("photo.bmp");
+    let mut bmp_data = vec![b'B', b'M'];
+    bmp_data.resize(18, 0); // pad to DIB header width
+    bmp_data.extend_from_slice(&[0x80, 0x07, 0x00, 0x00]); // width = 1920
+    bmp_data.extend_from_slice(&[0x38, 0x04, 0x00, 0x00]); // height = 1080
+    bmp_data.extend_from_slice(&[0x01, 0x00]); // planes = 1
+    bmp_data.extend_from_slice(&[0x18, 0x00]); // bpp = 24
+    fs::write(&bmp_path, &bmp_data).unwrap();
+
+    let preview = load_preview(&bmp_path);
+    if let PreviewContent::Image(img) = preview {
+        assert_eq!(img.format, ImageFormat::Bmp);
+        assert_eq!(img.width, 1920);
+        assert_eq!(img.height, 1080);
+        assert_eq!(img.aspect_ratio_str(), "16:9");
+    } else {
+        panic!("expected PreviewContent::Image for BMP, got {preview:?}");
+    }
+
+    // 4. Corrupted / truncated image file -> gracefully decodes fallback by extension without crash
+    let corrupt_png = temp.path().join("corrupt.png");
+    fs::write(&corrupt_png, b"corrupted bytes").unwrap();
+    let preview = load_preview(&corrupt_png);
+    assert!(matches!(
+        preview,
+        PreviewContent::Image(_) | PreviewContent::Binary | PreviewContent::Error(_)
+    ));
+}
+
+#[test]
+fn test_unicode_internationalization_support() {
+    let temp = TempDir::new("tv-unicode-support");
+    let filenames = [
+        "മലയാളം_രേഖ.txt",                    // Malayalam
+        "日本語のファイル.rs",              // Japanese
+        "中文文档_项目.md",                 // Chinese
+        "ملف_عربي_بيانات.json",             // Arabic
+        "Café_and_Résumé_2026.pdf",         // Accented Latin
+        "⚡_TerminalVision_🚀_🦀.rs",       // Emojis
+        "spaced filename with symbols.txt", // Spaces
+    ];
+
+    for name in filenames {
+        fs::write(temp.path().join(name), format!("Content of {name}")).unwrap();
+    }
+
+    let mut app = App::at(temp.path().to_path_buf()).unwrap();
+    assert_eq!(app.pane(ActivePane::Left).entries().len(), filenames.len());
+
+    // Navigation and selection through all Unicode entries
+    for _ in 0..filenames.len() {
+        app.handle_action(Action::MoveDown);
+        let sel = app.pane(ActivePane::Left).selected_entry();
+        assert!(sel.is_some());
+    }
+
+    // Test Search on Malayalam filename
+    app.handle_action(Action::StartSearch);
+    app.set_search_query("മലയാളം");
+    assert_eq!(app.pane(ActivePane::Left).visible_count(), 1);
+    let matched = app.pane(ActivePane::Left).visible_entries().next().unwrap();
+    assert_eq!(matched.name(), "മലയാളം_രേഖ.txt");
+    app.handle_action(Action::ClearSearch);
+
+    // Test Search on Emoji
+    app.handle_action(Action::StartSearch);
+    app.set_search_query("🚀");
+    assert_eq!(app.pane(ActivePane::Left).visible_count(), 1);
+    let matched = app.pane(ActivePane::Left).visible_entries().next().unwrap();
+    assert_eq!(matched.name(), "⚡_TerminalVision_🚀_🦀.rs");
+    app.handle_action(Action::ClearSearch);
+}
+
+#[test]
+fn test_extreme_terminal_dimensions_no_panic() {
+    use ratatui::layout::Rect;
+    use terminalvision::layout::geometry::ScreenLayout;
+
+    let test_sizes = [
+        (240, 80),
+        (200, 60),
+        (160, 40),
+        (120, 30),
+        (100, 30),
+        (80, 24),
+        (60, 15),
+        (40, 10),
+        (20, 5),
+        (1, 1),
+    ];
+
+    for (cols, rows) in test_sizes {
+        let area = Rect::new(0, 0, cols, rows);
+        let layout = ScreenLayout::calculate(area);
+
+        assert!(layout.header().height <= area.height);
+        assert!(layout.terminal().height <= area.height);
+        assert!(layout.footer().height <= area.height);
+        assert!(layout.terminal().y >= layout.header().y);
+        assert!(layout.footer().y >= layout.terminal().y);
+    }
+}
