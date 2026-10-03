@@ -15,6 +15,11 @@ use crate::input::shortcut::ShortcutRegistry;
 
 /// Whether a key event is an explicit interrupt request that asks the application to quit.
 pub fn is_quit_request(key: KeyEvent) -> bool {
+    is_quit_request_with_platform(key, Platform::current())
+}
+
+/// Whether a key event is an explicit interrupt request that asks the application to quit on `platform`.
+pub fn is_quit_request_with_platform(key: KeyEvent, platform: Platform) -> bool {
     if key.kind == KeyEventKind::Release {
         return false;
     }
@@ -22,14 +27,14 @@ pub fn is_quit_request(key: KeyEvent) -> bool {
     let is_c = key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C');
     let is_q = key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q');
 
-    if Platform::current().is_mac() {
-        // On macOS: Command+Q or Control+C is a quit request
-        (key.modifiers.contains(KeyModifiers::SUPER) && is_q)
-            || (key.modifiers.contains(KeyModifiers::CONTROL) && is_c)
+    let is_ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL) && is_c;
+    let is_primary_q = if platform.is_mac() {
+        key.modifiers.contains(KeyModifiers::SUPER) && is_q
     } else {
-        // On Windows/Linux: Control+Q or plain 'q' (in non-terminal)
         key.modifiers.contains(KeyModifiers::CONTROL) && is_q
-    }
+    };
+
+    is_ctrl_c || is_primary_q
 }
 
 /// Maps a physical key event to an [`Action`] based on the current [`Mode`] and active [`Platform`].
@@ -225,6 +230,33 @@ mod tests {
             KeyCode::Char('C'),
             KeyModifiers::CONTROL
         )));
+
+        // Test across platforms
+        assert!(is_quit_request_with_platform(
+            press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Platform::Mac
+        ));
+        assert!(is_quit_request_with_platform(
+            press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Platform::Linux
+        ));
+        assert!(is_quit_request_with_platform(
+            press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Platform::Windows
+        ));
+
+        assert!(is_quit_request_with_platform(
+            press(KeyCode::Char('q'), KeyModifiers::SUPER),
+            Platform::Mac
+        ));
+        assert!(is_quit_request_with_platform(
+            press(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            Platform::Linux
+        ));
+        assert!(is_quit_request_with_platform(
+            press(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            Platform::Windows
+        ));
     }
 
     #[test]
