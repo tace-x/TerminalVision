@@ -243,6 +243,16 @@ impl PtySession {
         }
     }
 
+    /// Child process ID of the interactive shell.
+    pub fn child_pid(&self) -> libc::pid_t {
+        self.child_pid
+    }
+
+    /// Queries the real operating system process working directory of the child shell.
+    pub fn get_process_cwd(&self) -> Option<std::path::PathBuf> {
+        get_child_process_cwd(self.child_pid)
+    }
+
     /// Sends a termination signal and reaps the child shell.
     pub fn terminate(&self) {
         self.is_alive.store(false, Ordering::SeqCst);
@@ -253,6 +263,77 @@ impl PtySession {
             libc::waitpid(self.child_pid, &mut status, libc::WNOHANG);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn get_child_process_cwd(pid: libc::pid_t) -> Option<std::path::PathBuf> {
+    const PROC_PIDVNODEPATHINFO: libc::c_int = 9;
+
+    #[repr(C)]
+    struct VnodeInfoPath {
+        _vnode_info: [u8; 152],
+        path: [u8; 1024],
+    }
+
+    #[repr(C)]
+    struct ProcVnodePathInfo {
+        cdir: VnodeInfoPath,
+        _rdir: VnodeInfoPath,
+    }
+
+    unsafe extern "C" {
+        fn proc_pidinfo(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffersize: libc::c_int,
+        ) -> libc::c_int;
+    }
+
+    let mut info: ProcVnodePathInfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<ProcVnodePathInfo>() as libc::c_int;
+    let res = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+
+    if res <= 0 {
+        return None;
+    }
+
+    let c_str = unsafe { std::ffi::CStr::from_ptr(info.cdir.path.as_ptr() as *const libc::c_char) };
+    if let Ok(path_str) = c_str.to_str() {
+        let trimmed = path_str.trim();
+        if !trimmed.is_empty() {
+            let p = std::path::PathBuf::from(trimmed);
+            if p.exists() && p.is_dir() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn get_child_process_cwd(pid: libc::pid_t) -> Option<std::path::PathBuf> {
+    let proc_path = format!("/proc/{pid}/cwd");
+    if let Ok(target) = std::fs::read_link(proc_path) {
+        if target.exists() && target.is_dir() {
+            return Some(target);
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn get_child_process_cwd(_pid: libc::pid_t) -> Option<std::path::PathBuf> {
+    None
 }
 
 impl Drop for PtySession {

@@ -9,9 +9,9 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::app::actions::Action;
 use crate::app::modes::Mode;
 use crate::app::state::{ActivePane, App, ClipboardOperation, ClipboardState, NotificationState};
-use crate::ui::theme::Theme;
 use crate::ui::{display_width, truncate_to_width};
 
 /// Formats the display name for an application [`Mode`].
@@ -32,7 +32,10 @@ pub fn mode_display(mode: Mode) -> &'static str {
         Mode::GitStatusPanel => "GIT STATUS",
         Mode::FileRadar => "FILE RADAR",
         Mode::RevealContext => "CONTEXT",
+        Mode::ContextMenu => "MENU",
         Mode::Terminal => "TERMINAL",
+        Mode::StorageVision => "STORAGE VISION",
+        Mode::ThemeSelector => "THEME SELECTOR",
     }
 }
 
@@ -92,7 +95,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let theme = Theme::default();
+    let theme = app.theme();
     let width = area.width as usize;
 
     // Error / Notification display (Priority 1)
@@ -128,7 +131,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let sel_count = active_pane.selected_count();
     let base_sel = selection_display(active_pane.selected_index(), active_pane.visible_count());
     let sel_str = if sel_count > 0 {
-        format!("[{sel_count} sel] {base_sel}")
+        let size = active_pane.aggregate_selected_size();
+        if size > 0 && width >= 80 {
+            format!(
+                "[{sel_count} sel • {}] {base_sel}",
+                crate::preview::format_size(size)
+            )
+        } else {
+            format!("[{sel_count} sel] {base_sel}")
+        }
     } else {
         base_sel
     };
@@ -262,17 +273,328 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // 5. Keyboard Hints (Priority 6)
-    let hint_width = display_width(hint_str);
-    if width > current_width + hint_width {
-        let padding = width - current_width - hint_width;
-        left_spans.push(Span::raw(" ".repeat(padding)));
-        left_spans.push(Span::styled(hint_str, theme.footer_hint));
+    // 5. Adaptive Actions / Keyboard Hints (Priority 6)
+    if app.mode() == Mode::Normal {
+        let actions = adaptive_actions(app, width);
+        let mut action_spans = Vec::new();
+        let mut actions_width = 0;
+
+        for (i, action) in actions.iter().enumerate() {
+            if i > 0 {
+                action_spans.push(Span::raw(" "));
+                actions_width += 1;
+            }
+            let btn_text = format!("[{}]", action.label);
+            actions_width += display_width(&btn_text);
+            action_spans.push(Span::styled(btn_text, theme.palette_shortcut));
+        }
+
+        let hint_width = display_width(hint_str);
+        if width > current_width + hint_width + actions_width + 4 {
+            let padding = width - current_width - hint_width - actions_width - 2;
+            left_spans.push(Span::raw(" ".repeat(padding)));
+            left_spans.push(Span::styled(hint_str, theme.footer_hint));
+            left_spans.push(Span::raw("  "));
+            left_spans.extend(action_spans);
+        } else if width > current_width + hint_width {
+            let padding = width - current_width - hint_width;
+            left_spans.push(Span::raw(" ".repeat(padding)));
+            left_spans.push(Span::styled(hint_str, theme.footer_hint));
+        } else if width > current_width + actions_width + 2 {
+            let padding = width - current_width - actions_width - 1;
+            left_spans.push(Span::raw(" ".repeat(padding)));
+            left_spans.extend(action_spans);
+        }
+    } else {
+        let hint_width = display_width(hint_str);
+        if width > current_width + hint_width {
+            let padding = width - current_width - hint_width;
+            left_spans.push(Span::raw(" ".repeat(padding)));
+            left_spans.push(Span::styled(hint_str, theme.footer_hint));
+        }
     }
 
     let line = Line::from(left_spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
+}
+
+/// An adaptive action exposed in the footer action area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveAction {
+    pub action: Action,
+    pub label: &'static str,
+}
+
+/// Generates the most relevant contextual actions based on selection and available width.
+pub fn adaptive_actions(app: &App, available_width: usize) -> Vec<AdaptiveAction> {
+    let active_pane = app.pane(app.active_pane());
+    let paths = active_pane.effective_selected_paths();
+
+    if paths.len() > 1 {
+        // Multiple selected
+        if available_width >= 90 {
+            vec![
+                AdaptiveAction {
+                    action: Action::Copy,
+                    label: "Copy",
+                },
+                AdaptiveAction {
+                    action: Action::Cut,
+                    label: "Cut",
+                },
+                AdaptiveAction {
+                    action: Action::Delete,
+                    label: "Delete",
+                },
+                AdaptiveAction {
+                    action: Action::GetInfo,
+                    label: "Info",
+                },
+                AdaptiveAction {
+                    action: Action::ContextMenu,
+                    label: "More",
+                },
+            ]
+        } else if available_width >= 60 {
+            vec![
+                AdaptiveAction {
+                    action: Action::Copy,
+                    label: "Copy",
+                },
+                AdaptiveAction {
+                    action: Action::Delete,
+                    label: "Delete",
+                },
+                AdaptiveAction {
+                    action: Action::ContextMenu,
+                    label: "More",
+                },
+            ]
+        } else {
+            vec![
+                AdaptiveAction {
+                    action: Action::Delete,
+                    label: "Delete",
+                },
+                AdaptiveAction {
+                    action: Action::ContextMenu,
+                    label: "More",
+                },
+            ]
+        }
+    } else if let Some(path) = paths.first() {
+        let is_dir = active_pane
+            .selected_entry()
+            .map(crate::filesystem::entry::Entry::is_dir)
+            .unwrap_or_else(|| path.is_dir());
+        if is_dir {
+            // Folder selected
+            if available_width >= 100 {
+                vec![
+                    AdaptiveAction {
+                        action: Action::Open,
+                        label: "Open",
+                    },
+                    AdaptiveAction {
+                        action: Action::Copy,
+                        label: "Copy",
+                    },
+                    AdaptiveAction {
+                        action: Action::Cut,
+                        label: "Cut",
+                    },
+                    AdaptiveAction {
+                        action: Action::Rename,
+                        label: "Rename",
+                    },
+                    AdaptiveAction {
+                        action: Action::Delete,
+                        label: "Delete",
+                    },
+                    AdaptiveAction {
+                        action: Action::ContextMenu,
+                        label: "More",
+                    },
+                ]
+            } else if available_width >= 70 {
+                vec![
+                    AdaptiveAction {
+                        action: Action::Open,
+                        label: "Open",
+                    },
+                    AdaptiveAction {
+                        action: Action::Copy,
+                        label: "Copy",
+                    },
+                    AdaptiveAction {
+                        action: Action::Rename,
+                        label: "Rename",
+                    },
+                    AdaptiveAction {
+                        action: Action::ContextMenu,
+                        label: "More",
+                    },
+                ]
+            } else {
+                vec![
+                    AdaptiveAction {
+                        action: Action::Open,
+                        label: "Open",
+                    },
+                    AdaptiveAction {
+                        action: Action::ContextMenu,
+                        label: "More",
+                    },
+                ]
+            }
+        } else {
+            // File selected
+            if available_width >= 100 {
+                vec![
+                    AdaptiveAction {
+                        action: Action::Open,
+                        label: "Open",
+                    },
+                    AdaptiveAction {
+                        action: Action::Preview,
+                        label: "Preview",
+                    },
+                    AdaptiveAction {
+                        action: Action::Copy,
+                        label: "Copy",
+                    },
+                    AdaptiveAction {
+                        action: Action::Rename,
+                        label: "Rename",
+                    },
+                    AdaptiveAction {
+                        action: Action::Delete,
+                        label: "Delete",
+                    },
+                    AdaptiveAction {
+                        action: Action::ContextMenu,
+                        label: "More",
+                    },
+                ]
+            } else if available_width >= 70 {
+                vec![
+                    AdaptiveAction {
+                        action: Action::Open,
+                        label: "Open",
+                    },
+                    AdaptiveAction {
+                        action: Action::Copy,
+                        label: "Copy",
+                    },
+                    AdaptiveAction {
+                        action: Action::Rename,
+                        label: "Rename",
+                    },
+                    AdaptiveAction {
+                        action: Action::ContextMenu,
+                        label: "More",
+                    },
+                ]
+            } else {
+                vec![
+                    AdaptiveAction {
+                        action: Action::Open,
+                        label: "Open",
+                    },
+                    AdaptiveAction {
+                        action: Action::ContextMenu,
+                        label: "More",
+                    },
+                ]
+            }
+        }
+    } else {
+        // Nothing selected / empty directory
+        if available_width >= 90 {
+            vec![
+                AdaptiveAction {
+                    action: Action::NewDirectory,
+                    label: "New Folder",
+                },
+                AdaptiveAction {
+                    action: Action::NewFile,
+                    label: "New File",
+                },
+                AdaptiveAction {
+                    action: Action::StartSearch,
+                    label: "Search",
+                },
+                AdaptiveAction {
+                    action: Action::RefreshDirectory,
+                    label: "Refresh",
+                },
+                AdaptiveAction {
+                    action: Action::ContextMenu,
+                    label: "More",
+                },
+            ]
+        } else if available_width >= 60 {
+            vec![
+                AdaptiveAction {
+                    action: Action::NewDirectory,
+                    label: "New Folder",
+                },
+                AdaptiveAction {
+                    action: Action::NewFile,
+                    label: "New File",
+                },
+                AdaptiveAction {
+                    action: Action::ContextMenu,
+                    label: "More",
+                },
+            ]
+        } else {
+            vec![
+                AdaptiveAction {
+                    action: Action::NewDirectory,
+                    label: "New",
+                },
+                AdaptiveAction {
+                    action: Action::ContextMenu,
+                    label: "More",
+                },
+            ]
+        }
+    }
+}
+
+/// Calculates hit testing ranges for adaptive action buttons in the footer.
+/// Returns `(action, start_x, end_x, y)`.
+pub fn action_hit_ranges(area: Rect, app: &App) -> Vec<(Action, u16, u16, u16)> {
+    if area.height == 0 || area.width == 0 || app.mode() != Mode::Normal {
+        return Vec::new();
+    }
+
+    let actions = adaptive_actions(app, area.width as usize);
+    let mut total_actions_w = 0;
+    for (i, a) in actions.iter().enumerate() {
+        total_actions_w += display_width(a.label) + 2; // [Label]
+        if i + 1 < actions.len() {
+            total_actions_w += 1; // space
+        }
+    }
+
+    if (area.width as usize) < total_actions_w + 35 {
+        return Vec::new();
+    }
+
+    let start_x = (area.x + area.width).saturating_sub(total_actions_w as u16 + 1);
+    let mut current_x = start_x;
+    let mut ranges = Vec::new();
+
+    for a in actions {
+        let btn_w = (display_width(a.label) + 2) as u16;
+        ranges.push((a.action, current_x, current_x + btn_w, area.y));
+        current_x += btn_w + 1;
+    }
+
+    ranges
 }
 
 #[cfg(test)]
@@ -281,6 +603,7 @@ mod tests {
     use crate::app::actions::Action;
     use crate::filesystem::test_support::TempDir;
     use crate::search::SearchMode;
+    use crate::ui::theme::Theme;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::fs;
@@ -528,7 +851,11 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let content: String = (0..80).map(|x| buffer[(x, 0)].symbol()).collect();
-        assert!(content.contains("[!]"), "footer must show error prefix [!]");
+        let theme = Theme::default();
+        assert!(
+            content.contains(theme.symbols.error_prefix) || content.contains("[!]"),
+            "footer must show error prefix"
+        );
     }
 
     #[test]
@@ -548,8 +875,9 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let content: String = (0..40).map(|x| buffer[(x, 0)].symbol()).collect();
+        let theme = Theme::default();
         assert_eq!(content.chars().count(), 40);
-        assert!(content.contains("[!]"));
+        assert!(content.contains(theme.symbols.error_prefix) || content.contains("[!]"));
     }
 
     #[test]
@@ -569,7 +897,8 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let content: String = (0..50).map(|x| buffer[(x, 0)].symbol()).collect();
-        assert!(content.contains("[!]"));
+        let theme = Theme::default();
+        assert!(content.contains(theme.symbols.error_prefix) || content.contains("[!]"));
     }
 
     #[test]
@@ -695,6 +1024,7 @@ mod tests {
         assert_eq!(mode_display(Mode::Bookmarks), "BOOKMARKS");
         assert_eq!(mode_display(Mode::Jump), "JUMP TO");
         assert_eq!(mode_display(Mode::SmartJump), "SMART JUMP");
+        assert_eq!(mode_display(Mode::ThemeSelector), "THEME SELECTOR");
     }
 
     #[test]

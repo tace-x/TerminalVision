@@ -8,12 +8,14 @@ pub mod dialogs;
 pub mod file_list;
 pub mod footer;
 pub mod header;
+pub mod motion;
 pub mod panes;
 pub mod preview;
 pub mod terminal;
 pub mod theme;
 
-pub use theme::{NotificationLevel, Spacing, Symbols, Theme};
+pub use motion::MotionState;
+pub use theme::{NotificationLevel, Spacing, Symbols, Theme, ThemeId, ThemePalette, ThemeRegistry};
 
 use std::path::Path;
 

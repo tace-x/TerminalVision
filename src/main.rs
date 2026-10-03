@@ -84,14 +84,14 @@ fn run() -> io::Result<()> {
     session.draw(&app)?;
 
     while !app.should_quit() {
-        let terminal_updated = app.terminal_poll_output();
-        if terminal_updated {
+        let updated = app.poll_sync_and_filesystem();
+        if updated {
             session.draw(&app)?;
         }
 
         if let Some(event) = next_event(POLL_INTERVAL, app.mode())? {
             apply_input_event(&mut app, event, &mut size, &mut mouse_tracker);
-            let _ = app.terminal_poll_output();
+            let _ = app.poll_sync_and_filesystem();
             if !app.should_quit() {
                 session.draw(&app)?;
             }
@@ -143,14 +143,16 @@ fn start_application() -> io::Result<App> {
 
         let metadata = std::fs::metadata(&resolved)?;
         if metadata.is_dir() {
-            let mut app = App::at(resolved).map_err(io::Error::other)?;
+            let mut app = App::at_working_directory().map_err(io::Error::other)?;
             let _ = app.load_persistent_state();
+            let _ = app.open_in(app.active_pane(), resolved.clone());
             Ok(app)
         } else {
             // It's a regular file: open its parent directory and select the file in the active pane.
             let parent = resolved.parent().unwrap_or(&cwd).to_path_buf();
-            let mut app = App::at(parent).map_err(io::Error::other)?;
+            let mut app = App::at_working_directory().map_err(io::Error::other)?;
             let _ = app.load_persistent_state();
+            let _ = app.open_in(app.active_pane(), parent);
             if let Some(file_name) = resolved.file_name() {
                 app.active_pane_mut().select_name(file_name);
                 app.refresh_preview();
@@ -160,6 +162,10 @@ fn start_application() -> io::Result<App> {
     } else {
         let mut app = App::at_working_directory().map_err(io::Error::other)?;
         let _ = app.load_persistent_state();
+        let cwd = terminalvision::filesystem::FilesystemService::new()
+            .current_directory()
+            .map_err(io::Error::other)?;
+        let _ = app.open_in(app.active_pane(), cwd);
         Ok(app)
     }
 }
@@ -240,6 +246,12 @@ fn apply_input_event(
                 app.git_status_panel_mut().move_up();
             } else if app.mode() == terminalvision::app::modes::Mode::RevealContext {
                 app.reveal_context_mut().move_up();
+            } else if app.mode() == terminalvision::app::modes::Mode::ContextMenu {
+                app.context_menu_mut().move_up();
+            } else if app.mode() == terminalvision::app::modes::Mode::StorageVision {
+                app.storage_vision_mut().move_up();
+            } else if app.mode() == terminalvision::app::modes::Mode::ThemeSelector {
+                app.theme_selector_move_up();
             }
         }
         InputEvent::ModalNavigateDown => {
@@ -255,6 +267,22 @@ fn apply_input_event(
                 app.git_status_panel_mut().move_down();
             } else if app.mode() == terminalvision::app::modes::Mode::RevealContext {
                 app.reveal_context_mut().move_down();
+            } else if app.mode() == terminalvision::app::modes::Mode::ContextMenu {
+                app.context_menu_mut().move_down();
+            } else if app.mode() == terminalvision::app::modes::Mode::StorageVision {
+                app.storage_vision_mut().move_down();
+            } else if app.mode() == terminalvision::app::modes::Mode::ThemeSelector {
+                app.theme_selector_move_down();
+            }
+        }
+        InputEvent::ModalNavigateRight => {
+            if app.mode() == terminalvision::app::modes::Mode::ContextMenu {
+                app.context_menu_mut().open_more();
+            }
+        }
+        InputEvent::ModalNavigateLeft => {
+            if app.mode() == terminalvision::app::modes::Mode::ContextMenu {
+                app.context_menu_mut().close_more();
             }
         }
         InputEvent::ModalToggle => {

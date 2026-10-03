@@ -12,8 +12,14 @@ use ratatui::layout::Rect;
 
 use crate::app::actions::Action;
 use crate::app::modes::Mode;
-use crate::app::state::{ActivePane, App};
+use crate::app::state::{ActivePane, App, ContextMenuItem};
 use crate::layout::geometry::{MainLayout, ScreenLayout};
+use crate::ui::dialogs::{
+    calculate_command_palette_rect, calculate_context_menu_rect, calculate_context_submenu_rect,
+    calculate_smart_jump_rect, calculate_theme_selector_rect,
+};
+use crate::ui::footer::action_hit_ranges;
+use crate::ui::theme::ThemeId;
 
 /// Maximum duration between two clicks on the same row to qualify as a double-click.
 pub const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(400);
@@ -175,6 +181,58 @@ pub fn handle_mouse_event_at(
     tracker: &mut MouseTracker,
     now: Instant,
 ) {
+    if app.mode() == Mode::ContextMenu {
+        handle_context_menu_mouse(event, app, terminal_area);
+        return;
+    }
+
+    if app.mode() == Mode::CommandPalette {
+        handle_command_palette_mouse(event, app, terminal_area);
+        return;
+    }
+
+    if app.mode() == Mode::SmartJump {
+        handle_smart_jump_mouse(event, app, terminal_area);
+        return;
+    }
+
+    if app.mode() == Mode::ThemeSelector {
+        handle_theme_selector_mouse(event, app, terminal_area);
+        return;
+    }
+
+    if app.mode() == Mode::Preview {
+        if matches!(event.kind, MouseEventKind::Down(_)) {
+            app.leave_temporary_mode();
+        }
+        return;
+    }
+
+    if app.mode() == Mode::StorageVision {
+        handle_storage_vision_mouse(event, app, terminal_area);
+        return;
+    }
+
+    if app.operation_manager().active_conflict.is_some() {
+        if let MouseEventKind::Down(MouseButton::Left) = event.kind {
+            let mgr = app.operation_manager_mut();
+            if let Some(conflict) = mgr.active_conflict.as_mut() {
+                conflict.next_option();
+            }
+        }
+        return;
+    }
+
+    if app.operation_manager().active_metrics.is_some() {
+        if let MouseEventKind::Down(MouseButton::Left) = event.kind {
+            let dialog_rect = crate::ui::dialogs::centered_rect(60, 10, terminal_area);
+            if contains(dialog_rect, event.column, event.row) {
+                app.operation_manager_mut().toggle_pause();
+            }
+        }
+        return;
+    }
+
     if app.mode() != Mode::Normal && app.mode() != Mode::Terminal {
         return;
     }
@@ -184,6 +242,43 @@ pub fn handle_mouse_event_at(
 
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // First check if the header Command Center button was clicked
+            let header_rect = layout.header();
+            let platform = crate::input::platform::Platform::current();
+            if let Some((start_x, end_x, y)) =
+                crate::ui::header::command_center_hit_range(header_rect, platform)
+                && event.row == y
+                && event.column >= start_x
+                && event.column < end_x
+            {
+                tracker.clear();
+                app.handle_action(Action::CommandPalette);
+                return;
+            }
+
+            // Check if a breadcrumb segment was clicked in the header
+            if let Some(target_path) =
+                crate::ui::header::breadcrumb_hit_segment(header_rect, app, event.column, event.row)
+            {
+                tracker.clear();
+                let active = app.active_pane();
+                let outcome = app.open_in(active, target_path);
+                app.report_navigation(outcome);
+                app.refresh_preview();
+                return;
+            }
+
+            // Next check if an adaptive action button in the footer was clicked
+            if app.mode() == Mode::Normal {
+                for (action, start_x, end_x, y) in action_hit_ranges(layout.footer(), app) {
+                    if event.row == y && event.column >= start_x && event.column < end_x {
+                        tracker.clear();
+                        app.handle_action(action);
+                        return;
+                    }
+                }
+            }
+
             let active = app.active_pane();
             if let Some((pane, pane_rect)) =
                 hit_test_pane(event.column, event.row, terminal_area, active)
@@ -211,18 +306,26 @@ pub fn handle_mouse_event_at(
                     scroll_offset,
                     total_count,
                 ) {
-                    if event
+                    let has_shift = event
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::SHIFT);
+                    let has_toggle = event
                         .modifiers
                         .contains(crossterm::event::KeyModifiers::CONTROL)
                         || event
                             .modifiers
-                            .contains(crossterm::event::KeyModifiers::SHIFT)
-                    {
+                            .contains(crossterm::event::KeyModifiers::SUPER);
+
+                    if has_shift {
+                        app.set_active_pane(pane);
+                        app.select_range_to(pane, index);
+                    } else if has_toggle {
                         app.set_active_pane(pane);
                         app.pane_mut(pane).toggle_selection(index);
                     } else {
                         app.select_entry(pane, index);
                     }
+
                     let is_double = tracker.record_left_click(pane, index, now);
                     if is_double {
                         if app.pane(pane).is_directory_at(index) {
@@ -232,9 +335,10 @@ pub fn handle_mouse_event_at(
                         }
                     }
                 } else {
-                    // Clicked border or empty area inside pane
+                    // Clicked empty area inside pane -> deselect all
                     tracker.clear();
                     app.set_active_pane(pane);
+                    app.pane_mut(pane).deselect_all();
                 }
             } else if contains(term_rect, event.column, event.row) {
                 tracker.clear();
@@ -254,6 +358,8 @@ pub fn handle_mouse_event_at(
                 if app.mode() == Mode::Terminal {
                     app.handle_action(Action::FocusFileManager);
                 }
+                app.set_active_pane(pane);
+
                 let scroll_offset = app.pane(pane).scroll_offset();
                 let total_count = app.pane(pane).visible_count();
 
@@ -264,11 +370,24 @@ pub fn handle_mouse_event_at(
                     scroll_offset,
                     total_count,
                 ) {
-                    app.select_entry(pane, index);
+                    // If clicked entry is not part of multi-selection, select it singly
+                    if let Some(path) = app.pane(pane).path_at(index) {
+                        let path_buf = path.to_path_buf();
+                        if !app.pane(pane).selected_paths().contains(&path_buf) {
+                            app.select_entry(pane, index);
+                        }
+                    } else {
+                        app.select_entry(pane, index);
+                    }
                 } else {
-                    app.set_active_pane(pane);
+                    // Clicked on empty space inside pane
+                    app.pane_mut(pane).deselect_all();
                 }
+
+                // Open context menu at mouse coordinates
+                app.open_context_menu((event.column, event.row));
             } else if contains(term_rect, event.column, event.row) {
+                // Do not steal right-click from terminal
                 app.handle_action(Action::FocusTerminal);
             }
         }
@@ -310,6 +429,402 @@ pub fn handle_mouse_event_at(
         _ => {
             // Ignore mouse up, move, drag, middle button, etc.
         }
+    }
+}
+
+/// Handles mouse interactions when the context menu is open.
+fn handle_context_menu_mouse(event: MouseEvent, app: &mut App, terminal_area: Rect) {
+    let menu = app.context_menu();
+    if menu.items.is_empty() {
+        app.close_context_menu();
+        return;
+    }
+
+    let menu_rect = calculate_context_menu_rect(menu.position, menu.items.len(), terminal_area);
+    let is_more_open = menu.is_more_open;
+    let selected_idx = menu.selected;
+
+    // Check submenu rect if open
+    let sub_rect = if is_more_open {
+        if let Some(ContextMenuItem::More { items, .. }) = menu.items.get(selected_idx) {
+            if !items.is_empty() {
+                Some(calculate_context_submenu_rect(
+                    menu_rect,
+                    selected_idx,
+                    items.len(),
+                    terminal_area,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            // Check submenu first if open
+            if let Some(srect) = sub_rect {
+                let inner_x = srect.x.saturating_add(1);
+                let inner_y = srect.y.saturating_add(1);
+                let inner_w = srect.width.saturating_sub(2);
+                let inner_h = srect.height.saturating_sub(2);
+                let s_inner = Rect::new(inner_x, inner_y, inner_w, inner_h);
+
+                if contains(s_inner, event.column, event.row) {
+                    let rel_row = event.row.saturating_sub(inner_y) as usize;
+                    if let Some(ContextMenuItem::More { items, .. }) =
+                        app.context_menu().items.get(selected_idx)
+                        && rel_row < items.len()
+                    {
+                        app.context_menu_mut().more_selected = rel_row;
+                        if let Some(action) = app.context_menu().selected_action() {
+                            app.close_context_menu();
+                            app.handle_action(action);
+                            return;
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // Check main menu
+            let inner_x = menu_rect.x.saturating_add(1);
+            let inner_y = menu_rect.y.saturating_add(1);
+            let inner_w = menu_rect.width.saturating_sub(2);
+            let inner_h = menu_rect.height.saturating_sub(2);
+            let m_inner = Rect::new(inner_x, inner_y, inner_w, inner_h);
+
+            if contains(m_inner, event.column, event.row) {
+                let rel_row = event.row.saturating_sub(inner_y) as usize;
+                if rel_row < app.context_menu().items.len() {
+                    match &app.context_menu().items[rel_row] {
+                        ContextMenuItem::More { .. } => {
+                            app.context_menu_mut().selected = rel_row;
+                            app.context_menu_mut().open_more();
+                        }
+                        ContextMenuItem::Action { .. } => {
+                            app.context_menu_mut().selected = rel_row;
+                            if let Some(action) = app.context_menu().selected_action() {
+                                app.close_context_menu();
+                                app.handle_action(action);
+                            }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+            }
+
+            // Clicked outside context menu -> close it
+            app.close_context_menu();
+        }
+
+        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+            // Update highlight on hover
+            if let Some(srect) = sub_rect {
+                let inner_x = srect.x.saturating_add(1);
+                let inner_y = srect.y.saturating_add(1);
+                let inner_w = srect.width.saturating_sub(2);
+                let inner_h = srect.height.saturating_sub(2);
+                let s_inner = Rect::new(inner_x, inner_y, inner_w, inner_h);
+
+                if contains(s_inner, event.column, event.row) {
+                    let rel_row = event.row.saturating_sub(inner_y) as usize;
+                    if let Some(ContextMenuItem::More { items, .. }) =
+                        app.context_menu().items.get(selected_idx)
+                        && rel_row < items.len()
+                    {
+                        app.context_menu_mut().more_selected = rel_row;
+                    }
+                    return;
+                }
+            }
+
+            let inner_x = menu_rect.x.saturating_add(1);
+            let inner_y = menu_rect.y.saturating_add(1);
+            let inner_w = menu_rect.width.saturating_sub(2);
+            let inner_h = menu_rect.height.saturating_sub(2);
+            let m_inner = Rect::new(inner_x, inner_y, inner_w, inner_h);
+
+            if contains(m_inner, event.column, event.row) {
+                let rel_row = event.row.saturating_sub(inner_y) as usize;
+                if rel_row < app.context_menu().items.len() {
+                    app.context_menu_mut().selected = rel_row;
+                }
+            }
+        }
+
+        MouseEventKind::Down(MouseButton::Right) => {
+            // Right-click outside closes menu
+            app.close_context_menu();
+        }
+
+        _ => {}
+    }
+}
+
+/// Handles mouse interactions when the Command Center is open.
+fn handle_command_palette_mouse(event: MouseEvent, app: &mut App, terminal_area: Rect) {
+    let dialog_rect = calculate_command_palette_rect(terminal_area);
+    if dialog_rect.width < 4 || dialog_rect.height < 4 {
+        return;
+    }
+
+    let inner = dialog_rect.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    if inner.height < 4 || inner.width == 0 {
+        return;
+    }
+
+    let chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Length(1), // Query input box
+            ratatui::layout::Constraint::Length(1), // Separator
+            ratatui::layout::Constraint::Min(1),    // Results list
+            ratatui::layout::Constraint::Length(1), // Footer hint
+        ])
+        .split(inner);
+
+    let list_rect = chunks[2];
+
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if contains(list_rect, event.column, event.row) {
+                let rel_row = event.row.saturating_sub(list_rect.y) as usize;
+                let selected = app.command_palette().selected_index();
+                let list_height = list_rect.height as usize;
+                let scroll_offset = if selected >= list_height {
+                    selected.saturating_sub(list_height - 1)
+                } else {
+                    0
+                };
+                let clicked_idx = scroll_offset + rel_row;
+                if clicked_idx < app.command_palette().entries().len() {
+                    app.command_palette_mut().select(clicked_idx);
+                    if let Some(action) = app.confirm_modal() {
+                        app.handle_action(action);
+                    }
+                }
+            } else if !contains(dialog_rect, event.column, event.row) {
+                // Clicked outside Command Center dialog -> close it
+                app.close_modal();
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            app.command_palette_mut().select_previous();
+        }
+        MouseEventKind::ScrollDown => {
+            app.command_palette_mut().select_next();
+        }
+        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
+            if contains(list_rect, event.column, event.row) =>
+        {
+            let rel_row = event.row.saturating_sub(list_rect.y) as usize;
+            let selected = app.command_palette().selected_index();
+            let list_height = list_rect.height as usize;
+            let scroll_offset = if selected >= list_height {
+                selected.saturating_sub(list_height - 1)
+            } else {
+                0
+            };
+            let hovered_idx = scroll_offset + rel_row;
+            if hovered_idx < app.command_palette().entries().len() {
+                app.command_palette_mut().select(hovered_idx);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Handles mouse interactions when the Quick Switcher is open.
+fn handle_smart_jump_mouse(event: MouseEvent, app: &mut App, terminal_area: Rect) {
+    let dialog_rect = calculate_smart_jump_rect(terminal_area);
+    if dialog_rect.width < 4 || dialog_rect.height < 4 {
+        return;
+    }
+
+    let inner = dialog_rect.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    if inner.height < 4 || inner.width == 0 {
+        return;
+    }
+
+    let chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Length(1), // Query input box
+            ratatui::layout::Constraint::Length(1), // Separator
+            ratatui::layout::Constraint::Min(1),    // Results list
+            ratatui::layout::Constraint::Length(1), // Footer hint
+        ])
+        .split(inner);
+
+    let list_rect = chunks[2];
+
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if contains(list_rect, event.column, event.row) {
+                let rel_row = event.row.saturating_sub(list_rect.y) as usize;
+                let selected = app.smart_jump().selected_index();
+                let list_height = list_rect.height as usize;
+                let scroll_offset = if selected >= list_height {
+                    selected.saturating_sub(list_height - 1)
+                } else {
+                    0
+                };
+                let clicked_idx = scroll_offset + rel_row;
+                if clicked_idx < app.smart_jump().filtered_items().len() {
+                    app.smart_jump_mut().select(clicked_idx);
+                    if let Some(action) = app.confirm_modal() {
+                        app.handle_action(action);
+                    }
+                }
+            } else if !contains(dialog_rect, event.column, event.row) {
+                // Clicked outside Quick Switcher dialog -> close it
+                app.close_modal();
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            app.smart_jump_mut().select_previous();
+        }
+        MouseEventKind::ScrollDown => {
+            app.smart_jump_mut().select_next();
+        }
+        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
+            if contains(list_rect, event.column, event.row) =>
+        {
+            let rel_row = event.row.saturating_sub(list_rect.y) as usize;
+            let selected = app.smart_jump().selected_index();
+            let list_height = list_rect.height as usize;
+            let scroll_offset = if selected >= list_height {
+                selected.saturating_sub(list_height - 1)
+            } else {
+                0
+            };
+            let hovered_idx = scroll_offset + rel_row;
+            if hovered_idx < app.smart_jump().filtered_items().len() {
+                app.smart_jump_mut().select(hovered_idx);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Handles mouse interactions when the Theme Selector modal is open.
+fn handle_theme_selector_mouse(event: MouseEvent, app: &mut App, terminal_area: Rect) {
+    let dialog_rect = calculate_theme_selector_rect(terminal_area);
+    if dialog_rect.width < 4 || dialog_rect.height < 4 {
+        return;
+    }
+
+    let inner = dialog_rect.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    if inner.height < 4 || inner.width == 0 {
+        return;
+    }
+
+    let chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Length(1), // Top instruction
+            ratatui::layout::Constraint::Min(1),    // Theme list
+            ratatui::layout::Constraint::Length(1), // Apply / Cancel buttons
+            ratatui::layout::Constraint::Length(1), // Footer hint
+        ])
+        .split(inner);
+
+    let list_rect = chunks[1];
+    let buttons_rect = chunks[2];
+
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if contains(list_rect, event.column, event.row) {
+                let rel_row = event.row.saturating_sub(list_rect.y) as usize;
+                let selected = app.theme_selector().selected_index();
+                let list_height = list_rect.height as usize;
+                let scroll_offset = if selected >= list_height {
+                    selected.saturating_sub(list_height - 1)
+                } else {
+                    0
+                };
+                let clicked_idx = scroll_offset + rel_row;
+                if clicked_idx < ThemeId::all().len() {
+                    app.theme_selector_select_index(clicked_idx);
+                }
+            } else if contains(buttons_rect, event.column, event.row) {
+                let mid_x = buttons_rect.x + buttons_rect.width / 2;
+                if event.column < mid_x {
+                    // Left button: Apply
+                    app.apply_theme_selector();
+                } else {
+                    // Right button: Cancel
+                    app.cancel_theme_selector();
+                }
+            } else if !contains(dialog_rect, event.column, event.row) {
+                // Clicked outside modal -> cancel and close
+                app.cancel_theme_selector();
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            app.theme_selector_move_up();
+        }
+        MouseEventKind::ScrollDown => {
+            app.theme_selector_move_down();
+        }
+        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
+            if contains(list_rect, event.column, event.row) =>
+        {
+            let rel_row = event.row.saturating_sub(list_rect.y) as usize;
+            let selected = app.theme_selector().selected_index();
+            let list_height = list_rect.height as usize;
+            let scroll_offset = if selected >= list_height {
+                selected.saturating_sub(list_height - 1)
+            } else {
+                0
+            };
+            let hovered_idx = scroll_offset + rel_row;
+            if hovered_idx < ThemeId::all().len() {
+                app.theme_selector_select_index(hovered_idx);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Handles mouse interactions when Storage Vision is open.
+fn handle_storage_vision_mouse(event: MouseEvent, app: &mut App, terminal_area: Rect) {
+    let dialog_rect = crate::ui::dialogs::centered_rect(84, 24, terminal_area);
+    if dialog_rect.width < 4 || dialog_rect.height < 4 {
+        return;
+    }
+
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if !contains(dialog_rect, event.column, event.row) {
+                app.close_modal();
+                return;
+            }
+            // If inside dialog, trigger drill down on selected item
+            app.storage_vision_mut().drill_down();
+        }
+        MouseEventKind::ScrollUp => {
+            app.storage_vision_mut().move_up();
+        }
+        MouseEventKind::ScrollDown => {
+            app.storage_vision_mut().move_down();
+        }
+        _ => {}
     }
 }
 

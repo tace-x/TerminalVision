@@ -77,7 +77,8 @@ impl PaneTabsConfig {
 }
 
 /// The complete persistent configuration for TerminalVision.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// The complete persistent configuration for TerminalVision.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// Active pane selection.
     pub active_pane: ActivePaneConfig,
@@ -87,6 +88,29 @@ pub struct Settings {
     pub right_tabs: PaneTabsConfig,
     /// Saved directory bookmarks.
     pub bookmarks: Vec<BookmarkConfig>,
+    /// Saved recent directory locations.
+    pub recent_locations: Vec<PathBuf>,
+    /// Saved recent file paths.
+    pub recent_files: Vec<PathBuf>,
+    /// Whether reduced motion is enabled (skips UI transition frames).
+    pub reduced_motion: bool,
+    /// Active visual theme identifier (e.g. "terminalvision", "cyberpunk", "nord").
+    pub theme: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            active_pane: ActivePaneConfig::default(),
+            left_tabs: PaneTabsConfig::default(),
+            right_tabs: PaneTabsConfig::default(),
+            bookmarks: Vec::new(),
+            recent_locations: Vec::new(),
+            recent_files: Vec::new(),
+            reduced_motion: false,
+            theme: "terminalvision".to_string(),
+        }
+    }
 }
 
 impl Settings {
@@ -102,7 +126,9 @@ impl Settings {
         out.push_str("version = 1\n\n");
 
         out.push_str("[settings]\n");
-        out.push_str(&format!("active_pane = {}\n\n", self.active_pane.as_str()));
+        out.push_str(&format!("active_pane = {}\n", self.active_pane.as_str()));
+        out.push_str(&format!("reduced_motion = {}\n", self.reduced_motion));
+        out.push_str(&format!("theme = {}\n\n", self.theme));
 
         out.push_str("[tabs.left]\n");
         out.push_str(&format!("active = {}\n", self.left_tabs.active_tab_index));
@@ -122,6 +148,18 @@ impl Settings {
         for b in &self.bookmarks {
             out.push_str(&format!("bookmark = {} | {}\n", b.name, b.path.display()));
         }
+        out.push('\n');
+
+        if !self.recent_locations.is_empty() || !self.recent_files.is_empty() {
+            out.push_str("[history]\n");
+            for path in &self.recent_locations {
+                out.push_str(&format!("location = {}\n", path.display()));
+            }
+            for path in &self.recent_files {
+                out.push_str(&format!("file = {}\n", path.display()));
+            }
+            out.push('\n');
+        }
 
         out
     }
@@ -135,6 +173,7 @@ impl Settings {
             TabsLeft,
             TabsRight,
             Bookmarks,
+            History,
         }
 
         let mut settings = Self::default();
@@ -149,10 +188,11 @@ impl Settings {
             if line.starts_with('[') && line.ends_with(']') {
                 let section_name = line[1..line.len() - 1].trim().to_lowercase();
                 current_section = match section_name.as_str() {
-                    "settings" => Section::Settings,
+                    "settings" | "appearance" => Section::Settings,
                     "tabs.left" | "tabs_left" => Section::TabsLeft,
                     "tabs.right" | "tabs_right" => Section::TabsRight,
                     "bookmarks" => Section::Bookmarks,
+                    "history" | "recent" => Section::History,
                     _ => Section::None,
                 };
                 continue;
@@ -168,6 +208,10 @@ impl Settings {
                 Section::Settings => {
                     if key == "active_pane" {
                         settings.active_pane = val.parse().unwrap_or(settings.active_pane);
+                    } else if key == "reduced_motion" {
+                        settings.reduced_motion = val.parse().unwrap_or(false);
+                    } else if key == "theme" && !val.is_empty() {
+                        settings.theme = val.trim_matches('"').trim_matches('\'').to_lowercase();
                     }
                 }
                 Section::TabsLeft => {
@@ -209,6 +253,19 @@ impl Settings {
                             if !settings.bookmarks.iter().any(|b| b.path == path) {
                                 settings.bookmarks.push(BookmarkConfig::new(name, path));
                             }
+                        }
+                    }
+                }
+                Section::History => {
+                    if (key == "location" || key == "dir" || key == "path") && !val.is_empty() {
+                        let path = PathBuf::from(val);
+                        if !settings.recent_locations.iter().any(|p| p == &path) {
+                            settings.recent_locations.push(path);
+                        }
+                    } else if key == "file" && !val.is_empty() {
+                        let path = PathBuf::from(val);
+                        if !settings.recent_files.iter().any(|p| p == &path) {
+                            settings.recent_files.push(path);
                         }
                     }
                 }
@@ -362,6 +419,13 @@ mod tests {
                 BookmarkConfig::new("Projects", PathBuf::from("/Users/alice/projects")),
                 BookmarkConfig::new("Downloads", PathBuf::from("/Users/alice/downloads")),
             ],
+            recent_locations: vec![
+                PathBuf::from("/Users/alice/projects"),
+                PathBuf::from("/Users/alice/downloads"),
+            ],
+            recent_files: vec![PathBuf::from("/Users/alice/projects/main.rs")],
+            reduced_motion: true,
+            theme: "terminalvision".to_string(),
         };
 
         let serialized = settings.serialize();
@@ -391,6 +455,10 @@ mod tests {
                 ),
                 BookmarkConfig::new("日本語", PathBuf::from("/home/user/日本語/フォルダ")),
             ],
+            recent_locations: vec![PathBuf::from("/home/user/📁 My Projects/🦀 Rust")],
+            recent_files: Vec::new(),
+            reduced_motion: false,
+            theme: "terminalvision".to_string(),
         };
 
         let serialized = settings.serialize();
@@ -411,11 +479,44 @@ mod tests {
                 "Documents",
                 PathBuf::from(r"C:\Users\Admin\Documents\Project A"),
             )],
+            recent_locations: vec![PathBuf::from(r"C:\Users\Admin\Documents\Project A")],
+            recent_files: vec![PathBuf::from(
+                r"C:\Users\Admin\Documents\Project A\file.txt",
+            )],
+            reduced_motion: false,
+            theme: "terminalvision".to_string(),
         };
 
         let serialized = settings.serialize();
         let loaded = Settings::deserialize(&serialized);
         assert_eq!(settings, loaded);
+    }
+
+    #[test]
+    fn test_history_deduplication() {
+        let raw = r#"
+            [history]
+            location = /home/user/proj1
+            location = /home/user/proj1
+            location = /home/user/proj2
+            file = /home/user/proj1/src/main.rs
+            file = /home/user/proj1/src/main.rs
+        "#;
+        let settings = Settings::deserialize(raw);
+        assert_eq!(settings.recent_locations.len(), 2);
+        assert_eq!(
+            settings.recent_locations[0],
+            PathBuf::from("/home/user/proj1")
+        );
+        assert_eq!(
+            settings.recent_locations[1],
+            PathBuf::from("/home/user/proj2")
+        );
+        assert_eq!(settings.recent_files.len(), 1);
+        assert_eq!(
+            settings.recent_files[0],
+            PathBuf::from("/home/user/proj1/src/main.rs")
+        );
     }
 
     #[test]
@@ -483,6 +584,10 @@ mod tests {
             left_tabs: PaneTabsConfig::new(0, vec![PathBuf::from("/tmp/test_left")]),
             right_tabs: PaneTabsConfig::new(0, vec![PathBuf::from("/tmp/test_right")]),
             bookmarks: vec![BookmarkConfig::new("Test", PathBuf::from("/tmp/test_left"))],
+            recent_locations: vec![PathBuf::from("/tmp/test_left")],
+            recent_files: Vec::new(),
+            reduced_motion: false,
+            theme: "terminalvision".to_string(),
         };
 
         // Save creates parent dirs

@@ -72,8 +72,11 @@ impl TerminalSession {
         }
     }
 
-    /// Current working directory of the shell (if tracked via OSC 7 or fallback to initial cwd).
+    /// Current working directory of the shell (if tracked via OS process CWD, OSC 7, or fallback to initial cwd).
     pub fn current_path(&self) -> PathBuf {
+        if let Some(proc_cwd) = self.pty.get_process_cwd() {
+            return proc_cwd;
+        }
         if let Ok(emu) = self.emulator.lock()
             && let Some(cwd) = emu.tracked_cwd()
         {
@@ -84,7 +87,9 @@ impl TerminalSession {
 
     /// Synchronizes the shell to a directory by typing `cd "<path>"\n`.
     pub fn cd_to_path(&self, target: &Path) -> io::Result<()> {
-        let cmd = format!(" cd \"{}\"\n", target.display());
+        let path_str = target.to_string_lossy();
+        let escaped = path_str.replace('\"', "\\\"");
+        let cmd = format!(" cd \"{}\"\n", escaped);
         self.write_bytes(cmd.as_bytes())
     }
 

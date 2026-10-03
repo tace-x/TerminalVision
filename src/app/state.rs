@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
@@ -20,6 +21,39 @@ use crate::filesystem::navigation::{
 use crate::filesystem::operations::{Operation, OperationError, OperationOutcome};
 use crate::git::{GitRepository, GitStatus, ProjectInfo};
 use crate::search::{CancelToken, Matcher, SearchMode};
+use crate::ui::theme::{Theme, ThemeId, ThemeRegistry};
+use crate::utils::path::{paths_are_equivalent, safe_fallback_directory};
+
+/// Opens a file with the host operating system's default application using native process APIs.
+pub fn open_system_default(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to execute 'open': {e}"))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to launch default application: {e}"))
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to execute 'xdg-open': {e}"))
+    }
+}
 
 /// The largest scroll offset a listing of `total_items` rows can have while a
 /// window of `visible_rows` rows still shows the last row.
@@ -104,6 +138,33 @@ impl ActivePane {
     }
 }
 
+/// Origin of a directory synchronization event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyncOrigin {
+    /// Initial startup synchronization.
+    #[default]
+    Startup,
+    /// User navigated in the File Manager (open, go_parent, history, smart jump, etc.).
+    FileManagerNavigation,
+    /// Shell child process changed directory (via cd in terminal or OSC 7).
+    ShellCwdChange,
+    /// Switched active File Manager pane.
+    ActivePaneSwitch,
+    /// Filesystem watcher detected disk changes.
+    FilesystemMutation,
+    /// Explicit internal refresh.
+    InternalRefresh,
+}
+
+/// The active filesystem location and synchronization state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveLocation {
+    pub path: PathBuf,
+    pub active_pane: ActivePane,
+    pub last_sync_origin: SyncOrigin,
+    pub synchronized: bool,
+}
+
 /// What one tab within a pane holds.
 ///
 /// A tab stores where it points, the entries discovered there, its sort mode,
@@ -117,6 +178,7 @@ pub struct Tab {
     sort_mode: SortMode,
     search: SearchState,
     selected_index: Option<usize>,
+    selection_anchor: Option<usize>,
     selected_paths: std::collections::HashSet<PathBuf>,
     scroll_offset: usize,
     git_status: GitStatus,
@@ -148,6 +210,7 @@ impl Tab {
             sort_mode: SortMode::Name,
             search: SearchState::default(),
             selected_index: None,
+            selection_anchor: None,
             selected_paths: std::collections::HashSet::new(),
             scroll_offset: 0,
             git_status,
@@ -332,6 +395,16 @@ impl Tab {
         self.selected_index = index;
     }
 
+    /// The selection anchor index in this tab, if any.
+    pub fn selection_anchor(&self) -> Option<usize> {
+        self.selection_anchor
+    }
+
+    /// Sets the selection anchor index directly.
+    pub fn set_selection_anchor(&mut self, anchor: Option<usize>) {
+        self.selection_anchor = anchor;
+    }
+
     /// How many entries are scrolled past.
     pub fn scroll_offset(&self) -> usize {
         self.scroll_offset
@@ -350,12 +423,16 @@ impl Tab {
     /// Moves the selection to `index` and scrolls so the entry stays visible.
     fn select(&mut self, index: usize, visible_rows: usize) {
         self.selected_index = Some(index);
+        self.selection_anchor = Some(index);
+        self.selected_paths.clear();
         self.scroll_to_selection(visible_rows);
     }
 
     /// Forgets the selection and returns to the top.
     fn clear_selection(&mut self) {
         self.selected_index = None;
+        self.selection_anchor = None;
+        self.selected_paths.clear();
         self.scroll_offset = 0;
     }
 
@@ -414,6 +491,52 @@ impl Tab {
         };
 
         self.select(next, visible_rows);
+    }
+
+    /// Extends the range selection towards the start by `steps`.
+    fn extend_selection_up(&mut self, steps: usize, visible_rows: usize) {
+        let Some(last) = self.last_index() else {
+            self.clear_selection();
+            return;
+        };
+        let current = self.selected_index.unwrap_or(0).min(last);
+        let anchor = self.selection_anchor.unwrap_or(current);
+        self.selection_anchor = Some(anchor);
+        let target = current.saturating_sub(steps);
+        self.selected_index = Some(target);
+        self.select_range(anchor, target);
+        self.scroll_to_selection(visible_rows);
+    }
+
+    /// Extends the range selection towards the end by `steps`.
+    fn extend_selection_down(&mut self, steps: usize, visible_rows: usize) {
+        let Some(last) = self.last_index() else {
+            self.clear_selection();
+            return;
+        };
+        let current = self.selected_index.unwrap_or(0).min(last);
+        let anchor = self.selection_anchor.unwrap_or(current);
+        self.selection_anchor = Some(anchor);
+        let target = current.saturating_add(steps).min(last);
+        self.selected_index = Some(target);
+        self.select_range(anchor, target);
+        self.scroll_to_selection(visible_rows);
+    }
+
+    /// Selects a contiguous range of items from anchor to `target`.
+    pub fn select_range_to(&mut self, target: usize, visible_rows: usize) {
+        let Some(last) = self.last_index() else {
+            self.clear_selection();
+            return;
+        };
+        let target_clamped = target.min(last);
+        let anchor = self
+            .selection_anchor
+            .unwrap_or_else(|| self.selected_index.unwrap_or(0).min(last));
+        self.selection_anchor = Some(anchor);
+        self.selected_index = Some(target_clamped);
+        self.select_range(anchor, target_clamped);
+        self.scroll_to_selection(visible_rows);
     }
 
     /// The selected entry of the tab's listing, when the selection points at one.
@@ -518,6 +641,11 @@ impl Tab {
 
     /// Toggles the multi-selection of the entry at `position`.
     pub fn toggle_selection(&mut self, position: usize) {
+        if position >= self.visible_count() {
+            return;
+        }
+        self.selected_index = Some(position);
+        self.selection_anchor = Some(position);
         if let Some(path) = self.shown_path(position).map(Path::to_path_buf) {
             if self.selected_paths.contains(&path) {
                 self.selected_paths.remove(&path);
@@ -565,6 +693,18 @@ impl Tab {
                 self.selected_paths.insert(path);
             }
         }
+    }
+
+    /// Computes the aggregate size in bytes of all currently selected entries.
+    pub fn aggregate_selected_size(&self) -> u64 {
+        let paths = self.effective_selected_paths();
+        let mut total = 0u64;
+        for path in paths {
+            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                total = total.saturating_add(meta.len());
+            }
+        }
+        total
     }
 
     /// How many items are currently multi-selected.
@@ -1018,6 +1158,14 @@ impl Pane {
         self.active_tab_mut().set_entries(entries);
     }
 
+    /// Refreshes the listing in the active tab while preserving selection and scroll.
+    pub fn refresh_preserving_selection(&mut self, entries: Vec<Entry>) {
+        let prev_selected = self.selected_path();
+        self.set_entries(entries);
+        self.reselect_or_first(prev_selected.as_deref());
+        self.refresh_git_and_project();
+    }
+
     /// Brings the active tab's selection and scroll offset back into range.
     pub fn clamp_to_entries(&mut self) {
         let rows = self.visible_rows;
@@ -1138,9 +1286,57 @@ impl Pane {
         self.active_tab().selected_count()
     }
 
+    /// The selection anchor index in the active tab, if any.
+    pub fn selection_anchor(&self) -> Option<usize> {
+        self.active_tab().selection_anchor()
+    }
+
+    /// Sets the selection anchor index in the active tab.
+    pub fn set_selection_anchor(&mut self, anchor: Option<usize>) {
+        self.active_tab_mut().set_selection_anchor(anchor);
+    }
+
+    /// Extends the active tab's range selection towards the start by `steps`.
+    pub fn extend_selection_up(&mut self, steps: usize) {
+        let rows = self.visible_rows;
+        self.active_tab_mut().extend_selection_up(steps, rows);
+    }
+
+    /// Extends the active tab's range selection towards the end by `steps`.
+    pub fn extend_selection_down(&mut self, steps: usize) {
+        let rows = self.visible_rows;
+        self.active_tab_mut().extend_selection_down(steps, rows);
+    }
+
+    /// Selects a contiguous range of items from anchor to `target` in the active tab.
+    pub fn select_range_to(&mut self, target: usize) {
+        let rows = self.visible_rows;
+        self.active_tab_mut().select_range_to(target, rows);
+    }
+
+    /// Computes the aggregate size in bytes of all currently selected entries.
+    pub fn aggregate_selected_size(&self) -> u64 {
+        self.active_tab().aggregate_selected_size()
+    }
+
     /// The list of selected paths in the active tab.
     pub fn effective_selected_paths(&self) -> Vec<PathBuf> {
         self.active_tab().effective_selected_paths()
+    }
+
+    /// The path of the entry at `index` in the active tab.
+    pub fn path_at(&self, index: usize) -> Option<&Path> {
+        self.active_tab().entry_at(index).map(|e| e.path())
+    }
+
+    /// The set of multi-selected paths in the active tab.
+    pub fn selected_paths(&self) -> &HashSet<PathBuf> {
+        &self.active_tab().selected_paths
+    }
+
+    /// The mutable set of multi-selected paths in the active tab.
+    pub fn selected_paths_mut(&mut self) -> &mut HashSet<PathBuf> {
+        &mut self.active_tab_mut().selected_paths
     }
 }
 
@@ -1640,6 +1836,11 @@ impl Bookmark {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Whether the destination path currently exists on disk.
+    pub fn is_valid(&self) -> bool {
+        self.path.exists()
+    }
 }
 
 /// The saved directory bookmarks.
@@ -1751,6 +1952,38 @@ impl BookmarkState {
         }
     }
 
+    /// Renames the currently selected bookmark.
+    pub fn rename_selected(&mut self, new_name: impl Into<String>) -> bool {
+        if let Some(b) = self.bookmarks.get_mut(self.selected) {
+            b.name = new_name.into();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Moves the currently selected bookmark upward in the order.
+    pub fn move_selected_up(&mut self) -> bool {
+        if self.selected > 0 && self.selected < self.bookmarks.len() {
+            self.bookmarks.swap(self.selected, self.selected - 1);
+            self.selected -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Moves the currently selected bookmark downward in the order.
+    pub fn move_selected_down(&mut self) -> bool {
+        if self.selected + 1 < self.bookmarks.len() {
+            self.bookmarks.swap(self.selected, self.selected + 1);
+            self.selected += 1;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Moves selection up one entry.
     pub fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
@@ -1802,6 +2035,73 @@ impl SettingsState {
     /// Sets the configuration path.
     pub fn set_config_path(&mut self, path: Option<PathBuf>) {
         self.config_path = path;
+    }
+}
+
+/// State for the interactive Theme Selector modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeSelectorState {
+    /// Currently selected theme index in `ThemeId::ALL`.
+    pub selected_index: usize,
+    /// The active theme before opening the selector (restored on Cancel).
+    pub initial_theme: ThemeId,
+}
+
+impl Default for ThemeSelectorState {
+    fn default() -> Self {
+        Self {
+            selected_index: 0,
+            initial_theme: ThemeId::TerminalVision,
+        }
+    }
+}
+
+impl ThemeSelectorState {
+    /// Creates a new theme selector state seeded with the currently active theme.
+    pub fn new(active_theme: ThemeId) -> Self {
+        let selected_index = ThemeId::all()
+            .iter()
+            .position(|&id| id == active_theme)
+            .unwrap_or(0);
+        Self {
+            selected_index,
+            initial_theme: active_theme,
+        }
+    }
+
+    /// Returns the currently highlighted theme ID.
+    pub fn selected_theme(&self) -> ThemeId {
+        ThemeId::all()[self.selected_index.min(ThemeId::all().len() - 1)]
+    }
+
+    /// Moves selection up one theme.
+    pub fn move_up(&mut self) {
+        if self.selected_index > 0 {
+            self.selected_index -= 1;
+        } else {
+            self.selected_index = ThemeId::all().len() - 1;
+        }
+    }
+
+    /// Moves selection down one theme.
+    pub fn move_down(&mut self) {
+        if self.selected_index + 1 < ThemeId::all().len() {
+            self.selected_index += 1;
+        } else {
+            self.selected_index = 0;
+        }
+    }
+
+    /// Returns the currently highlighted theme index.
+    pub fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+
+    /// Explicitly selects the theme at `index`.
+    pub fn select_index(&mut self, index: usize) {
+        if index < ThemeId::all().len() {
+            self.selected_index = index;
+        }
     }
 }
 
@@ -1955,6 +2255,16 @@ impl NotificationState {
         self.notice = Some(notice);
     }
 
+    /// Shows an informational or status message.
+    pub fn show_message(&mut self, text: impl Into<String>) {
+        self.notice = Some(Notice::new(
+            NoticeSource::Navigation,
+            None,
+            ErrorCategory::Other,
+            text.into(),
+        ));
+    }
+
     /// Removes the message.
     fn clear(&mut self) {
         self.notice = None;
@@ -1970,10 +2280,11 @@ impl NotificationState {
 /// The default state is deterministic and touches nothing outside itself: it
 /// neither reads the filesystem nor resolves the working directory, so a pane's
 /// path stays empty until a later phase decides where it should point.
-/// Bounded in-memory session history of visited directory locations.
+/// Bounded in-memory session history of visited directory locations and files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentLocations {
     locations: Vec<PathBuf>,
+    files: Vec<PathBuf>,
     max_entries: usize,
 }
 
@@ -1981,6 +2292,7 @@ impl Default for RecentLocations {
     fn default() -> Self {
         Self {
             locations: Vec::new(),
+            files: Vec::new(),
             max_entries: 50,
         }
     }
@@ -1994,6 +2306,11 @@ impl RecentLocations {
 
     /// Records a visited directory path, moving it to the front and suppressing duplicates.
     pub fn record(&mut self, path: PathBuf) {
+        self.record_directory(path);
+    }
+
+    /// Records a visited directory path, moving it to the front and suppressing duplicates.
+    pub fn record_directory(&mut self, path: PathBuf) {
         if path.as_os_str().is_empty() {
             return;
         }
@@ -2004,36 +2321,71 @@ impl RecentLocations {
         }
     }
 
+    /// Records an accessed/opened file path, moving it to the front and suppressing duplicates.
+    pub fn record_file(&mut self, path: PathBuf) {
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        self.files.retain(|p| p != &path);
+        self.files.insert(0, path);
+        if self.files.len() > self.max_entries {
+            self.files.truncate(self.max_entries);
+        }
+    }
+
     /// The slice of recently visited directory locations, newest first.
     pub fn locations(&self) -> &[PathBuf] {
         &self.locations
     }
 
+    /// The slice of recently accessed files, newest first.
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+
+    /// Sets the locations list directly.
+    pub fn set_locations(&mut self, locations: Vec<PathBuf>) {
+        self.locations = locations;
+    }
+
+    /// Sets the files list directly.
+    pub fn set_files(&mut self, files: Vec<PathBuf>) {
+        self.files = files;
+    }
+
+    /// Removes paths that no longer exist on disk.
+    pub fn cleanup_invalid(&mut self) {
+        self.locations.retain(|p| p.exists());
+        self.files.retain(|p| p.exists());
+    }
+
     /// How many locations are recorded.
     pub fn len(&self) -> usize {
-        self.locations.len()
+        self.locations.len() + self.files.len()
     }
 
     /// Whether the history is empty.
     pub fn is_empty(&self) -> bool {
-        self.locations.is_empty()
+        self.locations.is_empty() && self.files.is_empty()
     }
 }
 
-/// A destination item for the Smart Jump picker.
+/// A destination item for the Smart Jump / Quick Switcher picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmartJumpItem {
     /// The user-facing label of the destination.
     pub title: String,
     /// The destination filesystem path.
     pub path: PathBuf,
-    /// Category badge (e.g. `HOME`, `GIT ROOT`, `PROJECT`, `BOOKMARK`, `RECENT`, `TAB`, `PARENT`, `CURRENT`, `ROOT`).
+    /// Category badge (e.g. `HOME`, `GIT ROOT`, `PROJECT`, `BOOKMARK`, `RECENT`, `FILE`, `TAB`, `PARENT`, `CURRENT`, `ROOT`).
     pub category: &'static str,
     /// Visual icon or symbol.
     pub icon: &'static str,
+    /// Whether this destination is a file (true) or directory (false).
+    pub is_file: bool,
 }
 
-/// State for the unified Smart Jump dialog.
+/// State for the unified Smart Jump / Quick Switcher dialog.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SmartJumpState {
     query: String,
@@ -2068,24 +2420,25 @@ impl SmartJumpState {
         &self.items
     }
 
-    /// Destination items matching the current query.
+    /// Destination items matching the current query, ranked by fuzzy match score.
     pub fn filtered_items(&self) -> Vec<&SmartJumpItem> {
-        let trimmed = self.query.trim().to_lowercase();
+        let trimmed = self.query.trim();
         if trimmed.is_empty() {
             return self.items.iter().collect();
         }
-        self.items
-            .iter()
-            .filter(|item| {
-                item.title.to_lowercase().contains(&trimmed)
-                    || item
-                        .path
-                        .to_string_lossy()
-                        .to_lowercase()
-                        .contains(&trimmed)
-                    || item.category.to_lowercase().contains(&trimmed)
-            })
-            .collect()
+
+        let mut scored: Vec<(&SmartJumpItem, i32)> = Vec::new();
+        for item in &self.items {
+            let path_str = item.path.to_string_lossy();
+            let targets = [item.title.as_str(), &path_str, item.category];
+
+            if let Some(score) = crate::commands::fuzzy::fuzzy_match_multi(trimmed, &targets) {
+                scored.push((item, score));
+            }
+        }
+
+        scored.sort_by_key(|a| std::cmp::Reverse(a.1));
+        scored.into_iter().map(|(item, _)| item).collect()
     }
 
     /// The destination item currently selected, if any.
@@ -2127,6 +2480,27 @@ impl SmartJumpState {
         if count > 0 {
             self.selected = (self.selected + 1).min(count - 1);
         }
+    }
+
+    /// Sets the selected index explicitly (e.g. from mouse click).
+    pub fn set_selected(&mut self, index: usize) {
+        self.selected = index;
+        self.clamp_selection();
+    }
+
+    /// Sets the selected index (alias for set_selected).
+    pub fn select(&mut self, index: usize) {
+        self.set_selected(index);
+    }
+
+    /// Moves selection up one entry (alias for move_up).
+    pub fn select_previous(&mut self) {
+        self.move_up();
+    }
+
+    /// Moves selection down one entry (alias for move_down).
+    pub fn select_next(&mut self) {
+        self.move_down();
     }
 
     /// Resets the query to empty and selection to 0.
@@ -2409,6 +2783,222 @@ impl RevealContextState {
     }
 }
 
+/// An item in a contextual action popup menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextMenuItem {
+    /// Action that can be executed.
+    Action {
+        action: Action,
+        label: String,
+        shortcut: Option<String>,
+    },
+    /// Submenu (More ›).
+    More {
+        label: String,
+        items: Vec<ContextMenuItem>,
+    },
+    /// Disabled action (e.g. Paste when clipboard is empty).
+    Disabled {
+        label: String,
+        reason: Option<String>,
+    },
+    /// Visual separator line.
+    Separator,
+}
+
+impl ContextMenuItem {
+    /// Whether this item can be selected/navigated to.
+    pub fn is_selectable(&self) -> bool {
+        matches!(self, Self::Action { .. } | Self::More { .. })
+    }
+
+    /// The display label of this item.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Action { label, .. }
+            | Self::More { label, .. }
+            | Self::Disabled { label, .. } => label,
+            Self::Separator => "",
+        }
+    }
+}
+
+/// The state of an open contextual action menu.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextMenuState {
+    /// Top-level menu items.
+    pub items: Vec<ContextMenuItem>,
+    /// Selected index in top-level menu.
+    pub selected: usize,
+    /// Origin screen position (x, y) where the menu was summoned.
+    pub position: (u16, u16),
+    /// Whether the "More ›" submenu is currently expanded.
+    pub is_more_open: bool,
+    /// Selected index in the submenu when `is_more_open` is true.
+    pub more_selected: usize,
+    /// The screen Rect where the main context menu was rendered.
+    pub main_area: Option<ratatui::layout::Rect>,
+    /// The screen Rect where the submenu was rendered.
+    pub more_area: Option<ratatui::layout::Rect>,
+}
+
+impl ContextMenuState {
+    /// Creates a new context menu state.
+    pub fn new(items: Vec<ContextMenuItem>, position: (u16, u16)) -> Self {
+        let mut state = Self {
+            items,
+            selected: 0,
+            position,
+            is_more_open: false,
+            more_selected: 0,
+            main_area: None,
+            more_area: None,
+        };
+        state.ensure_valid_selection();
+        state
+    }
+
+    /// Ensures `selected` points to a selectable item.
+    fn ensure_valid_selection(&mut self) {
+        if self.items.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        if self.selected >= self.items.len() || !self.items[self.selected].is_selectable() {
+            if let Some(first) = self.items.iter().position(ContextMenuItem::is_selectable) {
+                self.selected = first;
+            } else {
+                self.selected = 0;
+            }
+        }
+    }
+
+    /// Moves selection up to the previous selectable item.
+    pub fn move_up(&mut self) {
+        if self.is_more_open {
+            if let Some(ContextMenuItem::More { items, .. }) = self.items.get(self.selected)
+                && !items.is_empty()
+            {
+                let mut prev = self.more_selected;
+                loop {
+                    if prev == 0 {
+                        prev = items.len().saturating_sub(1);
+                    } else {
+                        prev -= 1;
+                    }
+                    if items.get(prev).is_some_and(ContextMenuItem::is_selectable)
+                        || prev == self.more_selected
+                    {
+                        break;
+                    }
+                }
+                self.more_selected = prev;
+            }
+            return;
+        }
+
+        if self.items.is_empty() {
+            return;
+        }
+        let mut prev = self.selected;
+        loop {
+            if prev == 0 {
+                prev = self.items.len().saturating_sub(1);
+            } else {
+                prev -= 1;
+            }
+            if self
+                .items
+                .get(prev)
+                .is_some_and(ContextMenuItem::is_selectable)
+                || prev == self.selected
+            {
+                break;
+            }
+        }
+        self.selected = prev;
+    }
+
+    /// Moves selection down to the next selectable item.
+    pub fn move_down(&mut self) {
+        if self.is_more_open {
+            if let Some(ContextMenuItem::More { items, .. }) = self.items.get(self.selected)
+                && !items.is_empty()
+            {
+                let mut next = self.more_selected;
+                loop {
+                    next = (next + 1) % items.len();
+                    if items.get(next).is_some_and(ContextMenuItem::is_selectable)
+                        || next == self.more_selected
+                    {
+                        break;
+                    }
+                }
+                self.more_selected = next;
+            }
+            return;
+        }
+
+        if self.items.is_empty() {
+            return;
+        }
+        let mut next = self.selected;
+        loop {
+            next = (next + 1) % self.items.len();
+            if self
+                .items
+                .get(next)
+                .is_some_and(ContextMenuItem::is_selectable)
+                || next == self.selected
+            {
+                break;
+            }
+        }
+        self.selected = next;
+    }
+
+    /// Expands the More submenu if currently focused on a More item.
+    pub fn open_more(&mut self) {
+        if let Some(ContextMenuItem::More { items, .. }) = self.items.get(self.selected)
+            && !items.is_empty()
+        {
+            self.is_more_open = true;
+            self.more_selected = 0;
+            if let Some(first) = items.iter().position(ContextMenuItem::is_selectable) {
+                self.more_selected = first;
+            }
+        }
+    }
+
+    /// Closes the More submenu.
+    pub fn close_more(&mut self) {
+        self.is_more_open = false;
+        self.more_selected = 0;
+    }
+
+    /// Returns the currently active selected action, if any.
+    pub fn selected_action(&self) -> Option<Action> {
+        if self.is_more_open {
+            if let Some(ContextMenuItem::More { items, .. }) = self.items.get(self.selected)
+                && let Some(ContextMenuItem::Action { action, .. }) = items.get(self.more_selected)
+            {
+                return Some(*action);
+            }
+            return None;
+        }
+
+        match self.items.get(self.selected) {
+            Some(ContextMenuItem::Action { action, .. }) => Some(*action),
+            _ => None,
+        }
+    }
+
+    /// Whether the menu has no items.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
 /// The kind of entry being created in a creation dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateKind {
@@ -2453,6 +3043,7 @@ pub struct App {
     git_status_panel: GitStatusPanelState,
     file_radar: FileRadarState,
     reveal_context: RevealContextState,
+    context_menu: ContextMenuState,
     settings: SettingsState,
     notification: NotificationState,
     last_outcome: Option<OperationOutcome>,
@@ -2466,6 +3057,15 @@ pub struct App {
     palette: CommandPaletteState,
     focus_mode: bool,
     terminal: AppTerminal,
+    last_sync_origin: SyncOrigin,
+    last_synced_terminal_cwd: Option<PathBuf>,
+    filesystem_watcher: crate::filesystem::FilesystemWatcher,
+    operation_manager: crate::operations::OperationManager,
+    storage_vision: crate::storage::StorageVisionState,
+    motion: crate::ui::motion::MotionState,
+    active_theme: ThemeId,
+    preview_theme: Option<ThemeId>,
+    theme_selector: ThemeSelectorState,
 }
 
 impl App {
@@ -2519,6 +3119,10 @@ impl App {
 
         if which == self.active_pane {
             self.refresh_preview();
+            if self.last_sync_origin != SyncOrigin::ShellCwdChange {
+                self.last_sync_origin = SyncOrigin::FileManagerNavigation;
+                self.sync_terminal_to_directory();
+            }
         }
 
         Ok(())
@@ -2638,13 +3242,46 @@ impl App {
         }
     }
 
+    /// Returns the current active filesystem location and synchronization state.
+    /// Returns the current active filesystem location and synchronization state.
+    pub fn active_location(&self) -> ActiveLocation {
+        let path = self.pane(self.active_pane).current_path().clone();
+        let term_cwd = self.terminal_cwd();
+        ActiveLocation {
+            path: path.clone(),
+            active_pane: self.active_pane,
+            last_sync_origin: self.last_sync_origin,
+            synchronized: paths_are_equivalent(&path, &term_cwd),
+        }
+    }
+
+    /// Returns the origin of the last directory synchronization event.
+    pub fn last_sync_origin(&self) -> SyncOrigin {
+        self.last_sync_origin
+    }
+
+    /// Mutable reference to the filesystem watcher for testing or configuration.
+    pub fn filesystem_watcher_mut(&mut self) -> &mut crate::filesystem::FilesystemWatcher {
+        &mut self.filesystem_watcher
+    }
+
     /// Synchronizes the terminal shell's directory to the active pane's path.
-    pub fn sync_terminal_to_directory(&self) {
-        let path = self.pane(self.active_pane).current_path();
+    pub fn sync_terminal_to_directory(&mut self) {
+        let path = self.pane(self.active_pane).current_path().clone();
+        if self
+            .last_synced_terminal_cwd
+            .as_ref()
+            .is_some_and(|p| paths_are_equivalent(p, &path))
+            || paths_are_equivalent(&self.terminal_cwd(), &path)
+        {
+            self.last_synced_terminal_cwd = Some(path);
+            return;
+        }
         if let Ok(guard) = self.terminal.0.lock()
             && let Some(term) = guard.as_ref()
         {
-            let _ = term.cd_to_path(path);
+            let _ = term.cd_to_path(&path);
+            self.last_synced_terminal_cwd = Some(path);
         }
     }
 
@@ -2652,24 +3289,132 @@ impl App {
     pub fn sync_directory_to_terminal(&mut self) {
         let term_cwd = self.terminal_cwd();
         if term_cwd.exists() && term_cwd.is_dir() {
-            let active = self.active_pane;
-            let _ = self.open_in(active, term_cwd);
+            let _ = self.handle_shell_cwd_change(term_cwd);
         }
+    }
+
+    /// Handles a verified shell process working directory change without looping.
+    pub fn handle_shell_cwd_change(&mut self, new_cwd: PathBuf) -> bool {
+        if !new_cwd.is_dir() {
+            return false;
+        }
+        let active = self.active_pane;
+        if paths_are_equivalent(self.pane(active).current_path(), &new_cwd) {
+            self.last_synced_terminal_cwd = Some(new_cwd);
+            return false;
+        }
+        if let Ok(entries) = self.filesystem.list_directory(&new_cwd) {
+            self.last_sync_origin = SyncOrigin::ShellCwdChange;
+            self.recent_locations.record(new_cwd.clone());
+            let pane = self.pane_mut(active);
+            pane.navigate_to(new_cwd.clone());
+            pane.clear_selection();
+            pane.deselect_all();
+            pane.set_entries(entries);
+            pane.select_first();
+            self.refresh_preview();
+            self.last_synced_terminal_cwd = Some(new_cwd);
+            return true;
+        }
+        false
+    }
+
+    /// Polls terminal PTY output, detects shell process CWD changes, checks motion animations, and checks filesystem watcher.
+    pub fn poll_sync_and_filesystem(&mut self) -> bool {
+        let mut updated = self.terminal_poll_output();
+
+        if self.motion.is_active(std::time::Instant::now()) {
+            updated = true;
+        }
+
+        // 1. Check shell process working directory
+        let shell_cwd = self.terminal_cwd();
+        let active_fm_cwd = self.pane(self.active_pane).current_path().clone();
+        if !paths_are_equivalent(&shell_cwd, &active_fm_cwd)
+            && shell_cwd.exists()
+            && shell_cwd.is_dir()
+            && self.handle_shell_cwd_change(shell_cwd)
+        {
+            updated = true;
+        }
+
+        // 2. Poll filesystem watcher for changes to watched directories / preview file / git
+        let left_path = self.left.current_path().clone();
+        let right_path = self.right.current_path().clone();
+        let preview_path = self.preview.path().map(|p| p.to_path_buf());
+
+        let changes = self.filesystem_watcher.poll_changes(
+            &[left_path.clone(), right_path.clone()],
+            preview_path.as_deref(),
+        );
+
+        if !changes.is_empty() {
+            updated = true;
+            for change in changes {
+                match change {
+                    crate::filesystem::FilesystemChange::DirectoryModified(dir) => {
+                        if self.left.current_path() == &dir
+                            && let Ok(entries) = self.filesystem.list_directory(&dir)
+                        {
+                            self.left.refresh_preserving_selection(entries);
+                        }
+                        if self.right.current_path() == &dir
+                            && let Ok(entries) = self.filesystem.list_directory(&dir)
+                        {
+                            self.right.refresh_preserving_selection(entries);
+                        }
+                        if self.pane(self.active_pane).current_path() == &dir {
+                            self.refresh_preview();
+                        }
+                    }
+                    crate::filesystem::FilesystemChange::DirectoryDeleted(dir) => {
+                        let fallback = safe_fallback_directory(&dir);
+                        if self.left.current_path() == &dir {
+                            let _ = self.open_in(ActivePane::Left, fallback.clone());
+                        }
+                        if self.right.current_path() == &dir {
+                            let _ = self.open_in(ActivePane::Right, fallback.clone());
+                        }
+                        if self.pane(self.active_pane).current_path() == &fallback {
+                            self.sync_terminal_to_directory();
+                        }
+                    }
+                    crate::filesystem::FilesystemChange::PreviewFileModified(_)
+                    | crate::filesystem::FilesystemChange::PreviewFileDeleted(_) => {
+                        self.refresh_preview();
+                    }
+                    crate::filesystem::FilesystemChange::GitStateChanged(dir) => {
+                        if self.left.current_path() == &dir {
+                            self.left.refresh_git_and_project();
+                        }
+                        if self.right.current_path() == &dir {
+                            self.right.refresh_git_and_project();
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.mode == Mode::StorageVision {
+            let was_scanning = self.storage_vision.is_scanning;
+            self.storage_vision.poll_updates();
+            if was_scanning != self.storage_vision.is_scanning || self.storage_vision.is_scanning {
+                updated = true;
+            }
+        }
+
+        updated
     }
 
     /// Refreshes the directory listing of both panes without losing position.
     pub fn refresh_directory(&mut self) {
         let left_path = self.left.current_path().clone();
         if let Ok(entries) = self.filesystem.list_directory(&left_path) {
-            let sel = self.left.selected_index().unwrap_or(0);
-            self.left.set_entries(entries);
-            self.left.select(sel);
+            self.left.refresh_preserving_selection(entries);
         }
         let right_path = self.right.current_path().clone();
         if let Ok(entries) = self.filesystem.list_directory(&right_path) {
-            let sel = self.right.selected_index().unwrap_or(0);
-            self.right.set_entries(entries);
-            self.right.select(sel);
+            self.right.refresh_preserving_selection(entries);
         }
         self.refresh_preview();
     }
@@ -2693,6 +3438,8 @@ impl App {
         pane.select_first();
         if which == self.active_pane {
             self.refresh_preview();
+            self.last_sync_origin = SyncOrigin::FileManagerNavigation;
+            self.sync_terminal_to_directory();
         }
         Ok(())
     }
@@ -2712,6 +3459,8 @@ impl App {
         pane.select_first();
         if which == self.active_pane {
             self.refresh_preview();
+            self.last_sync_origin = SyncOrigin::FileManagerNavigation;
+            self.sync_terminal_to_directory();
         }
         Ok(())
     }
@@ -2721,11 +3470,13 @@ impl App {
     /// Enters the selected entry, if it is a directory or an enterable
     /// symbolic link.
     ///
-    /// Leaves the pane where it is if no entry is selected, or if the selected
-    /// entry is a file, an inaccessible directory, or a link that does not
-    /// resolve to one.
+    /// Opens the selected entry, or selected search result.
+    ///
+    /// Enters the selected entry, if it is a directory or an enterable symbolic link.
+    /// If the selected entry is a file, launches it with the host operating system's
+    /// default application without blocking the TUI or failing navigation.
     pub fn open_selected(&mut self) -> Result<(), NavigationError> {
-        let Some(entry) = self.pane(self.active_pane).selected_entry() else {
+        let Some(entry) = self.pane(self.active_pane).selected_entry().cloned() else {
             return Ok(());
         };
 
@@ -2736,12 +3487,39 @@ impl App {
         };
 
         if !enters {
+            let path = entry.path().to_path_buf();
+            let name_disp = entry.name().to_string_lossy().to_string();
+            match open_system_default(&path) {
+                Ok(()) => {
+                    self.notification
+                        .show_message(format!("Opened '{name_disp}' with default application"));
+                }
+                Err(err) => {
+                    self.notification
+                        .show_message(format!("Cannot open '{name_disp}': {err}"));
+                }
+            }
             return Ok(());
         }
 
         let directory = entry.path().to_path_buf();
         let which = self.active_pane;
         self.open_in(which, directory)
+    }
+
+    /// Accesses the active smart operation manager.
+    pub fn operation_manager(&self) -> &crate::operations::OperationManager {
+        &self.operation_manager
+    }
+
+    /// Mutably accesses the smart operation manager.
+    pub fn operation_manager_mut(&mut self) -> &mut crate::operations::OperationManager {
+        &mut self.operation_manager
+    }
+
+    /// Accesses the recent operations history.
+    pub fn operation_history(&self) -> &crate::operations::OperationHistory {
+        &self.operation_manager.history
     }
 
     /// Creates a file called `name` in the directory the active pane shows.
@@ -3035,6 +3813,13 @@ impl App {
         let finished = self.finish_change(outcome);
         if finished.is_ok() {
             self.clipboard.replace_path(&from, destination.clone());
+            let active = self.active_pane;
+            self.pane_mut(active).reselect_or_first(Some(&destination));
+            if self.pane_mut(active).selected_paths_mut().remove(&from) {
+                self.pane_mut(active)
+                    .selected_paths_mut()
+                    .insert(destination.clone());
+            }
 
             for tab in &mut self.left.tabs {
                 if tab.current_path() == &from {
@@ -3163,10 +3948,13 @@ impl App {
     /// Records the outcome of a navigation the user asked for.
     ///
     /// A failure is reported in the notification state, which is where the
+    /// Sets the notification when navigation fails.
+    ///
+    /// The outcome is inspected here rather than by the navigation itself so the
     /// application keeps what it has to tell the user. A success clears the
     /// previous failure, because a message about a directory the pane is no
     /// longer showing would be misleading.
-    fn report_navigation(&mut self, outcome: Result<(), NavigationError>) {
+    pub fn report_navigation(&mut self, outcome: Result<(), NavigationError>) {
         match outcome {
             Ok(()) => self.notification.clear(),
             Err(error) => self.notification.show(Notice::from(&error)),
@@ -3190,11 +3978,36 @@ impl App {
             // Leaves whatever temporary mode is active, throwing away a
             // search that was being entered. In `Normal`, clears multi-selection if any exists.
             Action::Cancel => {
-                if self.mode == Mode::Normal && self.pane(self.active_pane).selected_count() > 0 {
+                if self.mode == Mode::StorageVision {
+                    self.storage_vision.cancel();
+                    self.leave_temporary_mode();
+                } else if self.mode == Mode::ThemeSelector {
+                    self.cancel_theme_selector();
+                } else if self.mode == Mode::ContextMenu {
+                    if self.context_menu.is_more_open {
+                        self.context_menu.close_more();
+                    } else {
+                        self.close_context_menu();
+                    }
+                } else if self.mode == Mode::Normal
+                    && self.pane(self.active_pane).selected_count() > 0
+                {
                     self.active_pane_mut().deselect_all();
                 } else {
                     self.cancel();
                 }
+            }
+
+            Action::MoveUp if self.mode == Mode::ThemeSelector => {
+                self.theme_selector_move_up();
+            }
+
+            Action::MoveDown if self.mode == Mode::ThemeSelector => {
+                self.theme_selector_move_down();
+            }
+
+            Action::Open if self.mode == Mode::ThemeSelector => {
+                self.apply_theme_selector();
             }
 
             // A search can be cleared while browsing or while entering a query.
@@ -3209,8 +4022,35 @@ impl App {
                 self.active_pane_mut().cycle_search_mode();
             }
 
+            Action::Preview if self.mode == Mode::Preview => {
+                self.leave_temporary_mode();
+            }
+
             Action::RemoveBookmark if self.mode == Mode::Bookmarks => {
                 self.remove_selected_bookmark();
+            }
+
+            Action::MoveFavoriteUp if self.mode == Mode::Bookmarks => {
+                self.bookmarks.move_selected_up();
+            }
+
+            Action::MoveFavoriteDown if self.mode == Mode::Bookmarks => {
+                self.bookmarks.move_selected_down();
+            }
+
+            Action::GoParent if self.mode == Mode::StorageVision => {
+                if !self.storage_vision.go_back() {
+                    self.leave_temporary_mode();
+                }
+            }
+
+            Action::Open if self.mode == Mode::StorageVision => {
+                let target = self.storage_vision.selected_target();
+                self.leave_temporary_mode();
+                let which = self.active_pane;
+                let outcome = self.open_in(which, target);
+                self.report_navigation(outcome);
+                self.refresh_preview();
             }
 
             Action::ToggleTerminalFocus
@@ -3318,6 +4158,26 @@ impl App {
             Action::InvertSelection => {
                 self.active_pane_mut().invert_selection();
             }
+            Action::SelectRangeUp => {
+                self.active_pane_mut().extend_selection_up(1);
+                self.refresh_preview();
+            }
+            Action::SelectRangeDown => {
+                self.active_pane_mut().extend_selection_down(1);
+                self.refresh_preview();
+            }
+            Action::ContextMenu => {
+                let pane = self.pane(self.active_pane);
+                let sel_idx = pane.selected_index().unwrap_or(0);
+                let scroll = pane.scroll_offset();
+                let rel_row = sel_idx.saturating_sub(scroll) as u16;
+                let pos_x = 10;
+                let pos_y = (4 + rel_row).max(2);
+                self.open_context_menu((pos_x, pos_y));
+            }
+            Action::GetInfo => {
+                self.open_reveal_context();
+            }
 
             // Pasting changes the filesystem. What happened is recorded by the
             // operation itself, which is what the notification state is for,
@@ -3325,12 +4185,13 @@ impl App {
             Action::Paste => {
                 let _ = self.paste();
             }
-            // Switching only moves the focus. Neither pane is reloaded,
-            // reset or otherwise touched, so each keeps the directory,
-            // listing, selection and scroll offset it had.
+            // Switching moves the focus and synchronizes the embedded terminal
+            // to the newly active pane's directory.
             Action::SwitchPane => {
                 self.active_pane = self.active_pane.other();
+                self.last_sync_origin = SyncOrigin::ActivePaneSwitch;
                 self.refresh_preview();
+                self.sync_terminal_to_directory();
             }
 
             // Reorders what the active pane already holds. The other pane keeps
@@ -3408,8 +4269,7 @@ impl App {
                 self.refresh_preview();
             }
             Action::CommandPalette => {
-                self.mode = Mode::CommandPalette;
-                self.palette.clear();
+                self.open_command_palette();
             }
             Action::Help => {
                 self.mode = Mode::Help;
@@ -3543,6 +4403,30 @@ impl App {
             Action::RefreshDirectory => {
                 self.refresh_directory();
             }
+            Action::StorageVision => {
+                self.open_storage_vision();
+            }
+            Action::ThemeSelector => {
+                self.open_theme_selector();
+            }
+            Action::NextTheme => {
+                self.next_theme();
+            }
+            Action::PrevTheme => {
+                self.prev_theme();
+            }
+            Action::ToggleFavorite => {
+                self.toggle_favorite_for_current();
+            }
+            Action::RenameFavorite => {
+                // If in bookmarks/favorites modal, can rename
+            }
+            Action::MoveFavoriteUp => {
+                self.bookmarks.move_selected_up();
+            }
+            Action::MoveFavoriteDown => {
+                self.bookmarks.move_selected_down();
+            }
 
             // Handled before this point; listed so that the match stays
             // exhaustive over every action.
@@ -3581,7 +4465,7 @@ impl App {
     /// Only the overlay is left: the entries, the selection, the clipboard and
     /// any search query stay as they are. The preview is deactivated because
     /// leaving preview mode hides it.
-    fn leave_temporary_mode(&mut self) {
+    pub fn leave_temporary_mode(&mut self) {
         self.mode = Mode::Normal;
         self.create_kind = None;
         self.input_buffer.clear();
@@ -3593,8 +4477,14 @@ impl App {
         self.git_status_panel = GitStatusPanelState::new();
         self.file_radar = FileRadarState::default();
         self.reveal_context = RevealContextState::new();
+        self.preview_theme = None;
         self.preview.active = false;
         self.refresh_preview();
+    }
+
+    /// Closes any active modal dialog and returns to normal mode.
+    pub fn close_modal(&mut self) {
+        self.leave_temporary_mode();
     }
 
     /// Discards the search of the pane the application acts on and leaves
@@ -3663,8 +4553,12 @@ impl App {
         if self.mode != Mode::Normal {
             return;
         }
-        self.active_pane = which;
-        self.refresh_preview();
+        if self.active_pane != which {
+            self.active_pane = which;
+            self.last_sync_origin = SyncOrigin::ActivePaneSwitch;
+            self.refresh_preview();
+            self.sync_terminal_to_directory();
+        }
     }
 
     /// Activates `which` pane and selects entry at `index`.
@@ -3672,7 +4566,12 @@ impl App {
         if self.mode != Mode::Normal {
             return;
         }
+        let pane_changed = self.active_pane != which;
         self.active_pane = which;
+        if pane_changed {
+            self.last_sync_origin = SyncOrigin::ActivePaneSwitch;
+            self.sync_terminal_to_directory();
+        }
         let pane = self.pane_mut(which);
         let total = pane.visible_count();
         if total > 0 {
@@ -3691,7 +4590,34 @@ impl App {
 
     /// Sets the interaction mode.
     pub fn set_mode(&mut self, mode: Mode) {
+        if mode != self.mode {
+            if mode.is_modal() {
+                self.motion.notify_dialog_opened();
+            } else if self.mode.is_modal() {
+                self.motion.clear_dialog_transition();
+            }
+        }
         self.mode = mode;
+    }
+
+    /// The motion state tracker.
+    pub fn motion(&self) -> &crate::ui::motion::MotionState {
+        &self.motion
+    }
+
+    /// Mutable motion state tracker.
+    pub fn motion_mut(&mut self) -> &mut crate::ui::motion::MotionState {
+        &mut self.motion
+    }
+
+    /// Whether reduced motion is active.
+    pub fn reduced_motion(&self) -> bool {
+        self.motion.reduced_motion
+    }
+
+    /// Sets the reduced motion preference.
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.motion.reduced_motion = reduced;
     }
 
     /// Whether distraction-free Focus Mode is active.
@@ -3706,7 +4632,11 @@ impl App {
 
     /// Enters confirmation mode for deleting the selected entry if one exists.
     pub fn prompt_delete_confirmation(&mut self) {
-        if self.pane(self.active_pane).selected_entry().is_some() {
+        if !self
+            .pane(self.active_pane)
+            .effective_selected_paths()
+            .is_empty()
+        {
             self.mode = Mode::Confirm;
             self.confirm_selection = false;
         }
@@ -3751,6 +4681,11 @@ impl App {
     /// The command palette state.
     pub fn command_palette(&self) -> &CommandPaletteState {
         &self.palette
+    }
+
+    /// The command palette state, mutably.
+    pub fn command_palette_mut(&mut self) -> &mut CommandPaletteState {
+        &mut self.palette
     }
 
     /// Inserts a character at the cursor position in input buffer.
@@ -3867,6 +4802,26 @@ impl App {
                     let action = cmd.action();
                     self.leave_temporary_mode();
                     Some(action)
+                } else if let Some(target) = self.palette.selected_navigation_target() {
+                    self.leave_temporary_mode();
+                    let which = self.active_pane;
+                    if target.is_file() {
+                        if let Some(parent) = target.parent() {
+                            let parent_buf = parent.to_path_buf();
+                            let file_name = target.file_name().map(|n| n.to_os_string());
+                            let outcome = self.open_in(which, parent_buf);
+                            self.report_navigation(outcome);
+                            if let Some(name) = file_name {
+                                self.pane_mut(which).select_name(&name);
+                            }
+                            self.refresh_preview();
+                        }
+                    } else {
+                        let outcome = self.open_in(which, target);
+                        self.report_navigation(outcome);
+                        self.refresh_preview();
+                    }
+                    None
                 } else {
                     self.leave_temporary_mode();
                     None
@@ -3914,9 +4869,22 @@ impl App {
                 self.leave_temporary_mode();
                 if let Some(target) = selected_target {
                     let which = self.active_pane;
-                    let outcome = self.open_in(which, target);
-                    self.report_navigation(outcome);
-                    self.refresh_preview();
+                    if target.is_file() {
+                        if let Some(parent) = target.parent() {
+                            let parent_buf = parent.to_path_buf();
+                            let file_name = target.file_name().map(|n| n.to_os_string());
+                            let outcome = self.open_in(which, parent_buf);
+                            self.report_navigation(outcome);
+                            if let Some(name) = file_name {
+                                self.pane_mut(which).select_name(&name);
+                            }
+                            self.refresh_preview();
+                        }
+                    } else {
+                        let outcome = self.open_in(which, target);
+                        self.report_navigation(outcome);
+                        self.refresh_preview();
+                    }
                 }
                 None
             }
@@ -3969,11 +4937,73 @@ impl App {
                 }
                 None
             }
+            Mode::ContextMenu => {
+                if let Some(action) = self.context_menu.selected_action() {
+                    self.close_context_menu();
+                    Some(action)
+                } else if let Some(ContextMenuItem::More { .. }) =
+                    self.context_menu.items.get(self.context_menu.selected)
+                {
+                    if self.context_menu.is_more_open {
+                        self.context_menu.close_more();
+                    } else {
+                        self.context_menu.open_more();
+                    }
+                    None
+                } else {
+                    self.close_context_menu();
+                    None
+                }
+            }
+            Mode::StorageVision => {
+                self.storage_vision.drill_down();
+                None
+            }
+            Mode::ThemeSelector => {
+                self.apply_theme_selector();
+                None
+            }
             _ => None,
         }
     }
 
-    /// Opens the unified Smart Jump modal, collecting all available targets across the system.
+    /// Opens the Command Center, collecting contextual application state and accessible entries.
+    pub fn open_command_palette(&mut self) {
+        self.mode = Mode::CommandPalette;
+
+        let (context, mut accessible) = {
+            let active_pane = self.pane(self.active_pane);
+            let selected_entry = active_pane.selected_entry();
+            let context = crate::commands::palette::ContextFilter {
+                has_selection: selected_entry.is_some(),
+                selected_is_dir: selected_entry.is_some_and(|e| e.is_dir()),
+                selected_count: active_pane.selected_count(),
+                is_empty_dir: active_pane.entries().is_empty(),
+                is_terminal_focused: false,
+                has_git: active_pane.git().is_repo(),
+                has_project: active_pane.project_info().root.is_some(),
+                has_clipboard: self.clipboard.operation.is_some(),
+            };
+
+            let mut accessible = Vec::new();
+            for entry in active_pane.entries() {
+                accessible.push(entry.path().to_path_buf());
+            }
+            (context, accessible)
+        };
+
+        for file in self.recent_locations.files() {
+            if !accessible.contains(file) {
+                accessible.push(file.clone());
+            }
+        }
+
+        self.palette.clear();
+        self.palette.set_context(context);
+        self.palette.set_accessible_files(accessible);
+    }
+
+    /// Opens the unified Quick Switcher / Smart Jump modal, collecting all available targets across the system.
     pub fn open_smart_jump(&mut self) {
         self.mode = Mode::SmartJump;
         self.smart_jump.clear();
@@ -3982,8 +5012,39 @@ impl App {
         let mut items = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // 1. Current directory
-        if !active_path.as_os_str().is_empty() {
+        // 1. Recent Locations (folders)
+        for recent in self.recent_locations.locations() {
+            if recent.exists() && recent.is_dir() && seen.insert(recent.clone()) {
+                let name = recent
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_else(|| recent.to_str().unwrap_or("/"));
+                items.push(SmartJumpItem {
+                    title: format!("{name} ({})", recent.display()),
+                    path: recent.clone(),
+                    category: "RECENT",
+                    icon: "📁",
+                    is_file: false,
+                });
+            }
+        }
+
+        // 2. Recent Files
+        for file in self.recent_locations.files() {
+            if file.exists() && file.is_file() && seen.insert(file.clone()) {
+                let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                items.push(SmartJumpItem {
+                    title: format!("{name} ({})", file.display()),
+                    path: file.clone(),
+                    category: "RECENT",
+                    icon: "📄",
+                    is_file: true,
+                });
+            }
+        }
+
+        // 3. Current directory
+        if !active_path.as_os_str().is_empty() && seen.insert(active_path.clone()) {
             let name = active_path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -3993,11 +5054,11 @@ impl App {
                 path: active_path.clone(),
                 category: "CURRENT",
                 icon: "📁",
+                is_file: false,
             });
-            seen.insert(active_path.clone());
         }
 
-        // 2. Parent directory
+        // 4. Parent directory
         if let Some(parent) = parent_of(&active_path)
             && seen.insert(parent.clone())
         {
@@ -4006,10 +5067,11 @@ impl App {
                 path: parent,
                 category: "PARENT",
                 icon: "⬆️",
+                is_file: false,
             });
         }
 
-        // 3. Git Root (if active)
+        // 5. Git Root (if active)
         if let Some(git_root) = self.pane(self.active_pane).git().root() {
             let git_buf = git_root.to_path_buf();
             if seen.insert(git_buf.clone()) {
@@ -4022,11 +5084,12 @@ impl App {
                     path: git_buf,
                     category: "GIT ROOT",
                     icon: "🌳",
+                    is_file: false,
                 });
             }
         }
 
-        // 4. Project Root (if active)
+        // 6. Project Root (if active)
         if let Some(ref proj_root) = self.pane(self.active_pane).project_info().root
             && seen.insert(proj_root.clone())
         {
@@ -4039,10 +5102,11 @@ impl App {
                 path: proj_root.clone(),
                 category: "PROJECT",
                 icon: "📦",
+                is_file: false,
             });
         }
 
-        // 5. User Home Directory
+        // 7. User Home Directory
         if let Some(home) = crate::utils::path::home_dir()
             && seen.insert(home.clone())
         {
@@ -4051,10 +5115,11 @@ impl App {
                 path: home,
                 category: "HOME",
                 icon: "🏠",
+                is_file: false,
             });
         }
 
-        // 6. Filesystem Root
+        // 8. Filesystem Root
         let fs_root = crate::utils::path::filesystem_root(&active_path);
         if seen.insert(fs_root.clone()) {
             items.push(SmartJumpItem {
@@ -4062,10 +5127,11 @@ impl App {
                 path: fs_root,
                 category: "ROOT",
                 icon: "🗄️",
+                is_file: false,
             });
         }
 
-        // 7. Bookmarks
+        // 9. Bookmarks
         for bm in self.bookmarks.bookmarks() {
             if seen.insert(bm.path().to_path_buf()) {
                 items.push(SmartJumpItem {
@@ -4073,11 +5139,12 @@ impl App {
                     path: bm.path().to_path_buf(),
                     category: "BOOKMARK",
                     icon: "🔖",
+                    is_file: false,
                 });
             }
         }
 
-        // 8. Open Tabs
+        // 10. Open Tabs
         for pane_kind in [ActivePane::Left, ActivePane::Right] {
             let p = self.pane(pane_kind);
             for (t_idx, tab) in p.tabs().iter().enumerate() {
@@ -4094,19 +5161,26 @@ impl App {
                         path: tab.current_path().clone(),
                         category: "TAB",
                         icon: "📑",
+                        is_file: false,
                     });
                 }
             }
         }
 
-        // 9. Recent Locations
-        for recent in self.recent_locations.locations() {
-            if seen.insert(recent.clone()) {
+        // 11. Current directory entries (files and folders)
+        for entry in self.pane(self.active_pane).entries() {
+            let path = entry.path().to_path_buf();
+            if seen.insert(path.clone()) {
+                let name = entry.name().to_string_lossy().to_string();
+                let is_dir = entry.is_dir();
+                let icon = if is_dir { "📁" } else { "📄" };
+                let cat = if is_dir { "FOLDER" } else { "FILE" };
                 items.push(SmartJumpItem {
-                    title: recent.display().to_string(),
-                    path: recent.clone(),
-                    category: "RECENT",
-                    icon: "🕒",
+                    title: name,
+                    path,
+                    category: cat,
+                    icon,
+                    is_file: !is_dir,
                 });
             }
         }
@@ -4117,6 +5191,11 @@ impl App {
     /// Accessor for session recent locations history.
     pub fn recent_locations(&self) -> &RecentLocations {
         &self.recent_locations
+    }
+
+    /// Mutable accessor for session recent locations history.
+    pub fn recent_locations_mut(&mut self) -> &mut RecentLocations {
+        &mut self.recent_locations
     }
 
     /// Accessor for Smart Jump state.
@@ -4538,6 +5617,90 @@ impl App {
         self.bookmarks.remove_selected()
     }
 
+    /// Returns the currently active or live-previewed Theme definition.
+    pub fn theme(&self) -> Theme {
+        ThemeRegistry::get(self.theme_id())
+    }
+
+    /// Returns the active or previewed ThemeId.
+    pub fn theme_id(&self) -> ThemeId {
+        self.preview_theme.unwrap_or(self.active_theme)
+    }
+
+    /// Returns the permanently active ThemeId (ignoring temporary live previews).
+    pub fn active_theme_id(&self) -> ThemeId {
+        self.active_theme
+    }
+
+    /// Sets the active theme directly and saves to persistent configuration.
+    pub fn set_active_theme(&mut self, theme_id: ThemeId) {
+        self.active_theme = theme_id;
+        self.preview_theme = None;
+        self.save_persistent_state().ok();
+    }
+
+    /// Returns the ThemeSelector state.
+    pub fn theme_selector(&self) -> &ThemeSelectorState {
+        &self.theme_selector
+    }
+
+    /// Returns mutable ThemeSelector state.
+    pub fn theme_selector_mut(&mut self) -> &mut ThemeSelectorState {
+        &mut self.theme_selector
+    }
+
+    /// Opens the Theme Selector dialog and initializes live preview.
+    pub fn open_theme_selector(&mut self) {
+        self.theme_selector = ThemeSelectorState::new(self.active_theme);
+        self.preview_theme = Some(self.active_theme);
+        self.mode = Mode::ThemeSelector;
+    }
+
+    /// Moves selection up in the Theme Selector and updates live preview.
+    pub fn theme_selector_move_up(&mut self) {
+        self.theme_selector.move_up();
+        self.preview_theme = Some(self.theme_selector.selected_theme());
+    }
+
+    /// Moves selection down in the Theme Selector and updates live preview.
+    pub fn theme_selector_move_down(&mut self) {
+        self.theme_selector.move_down();
+        self.preview_theme = Some(self.theme_selector.selected_theme());
+    }
+
+    /// Selects a specific theme index in the Theme Selector and updates live preview.
+    pub fn theme_selector_select_index(&mut self, index: usize) {
+        self.theme_selector.select_index(index);
+        self.preview_theme = Some(self.theme_selector.selected_theme());
+    }
+
+    /// Applies the selected theme from the Theme Selector permanently.
+    pub fn apply_theme_selector(&mut self) {
+        let chosen = self.theme_selector.selected_theme();
+        self.active_theme = chosen;
+        self.preview_theme = None;
+        self.mode = Mode::Normal;
+        self.save_persistent_state().ok();
+    }
+
+    /// Cancels theme selection and restores the initial theme.
+    pub fn cancel_theme_selector(&mut self) {
+        self.preview_theme = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Switches to the next available visual theme.
+    pub fn next_theme(&mut self) {
+        let next = ThemeRegistry::next(self.active_theme);
+        self.set_active_theme(next);
+    }
+
+    /// Switches to the previous available visual theme.
+    pub fn prev_theme(&mut self) {
+        let prev = ThemeRegistry::prev(self.active_theme);
+        self.set_active_theme(prev);
+    }
+
     /// Accessor for bookmark state.
     pub fn bookmarks(&self) -> &BookmarkState {
         &self.bookmarks
@@ -4546,6 +5709,33 @@ impl App {
     /// Mutable accessor for bookmark state.
     pub fn bookmarks_mut(&mut self) -> &mut BookmarkState {
         &mut self.bookmarks
+    }
+
+    /// Accessor for Storage Vision state.
+    pub fn storage_vision(&self) -> &crate::storage::StorageVisionState {
+        &self.storage_vision
+    }
+
+    /// Mutable accessor for Storage Vision state.
+    pub fn storage_vision_mut(&mut self) -> &mut crate::storage::StorageVisionState {
+        &mut self.storage_vision
+    }
+
+    /// Opens the Storage Vision analysis workspace for the active directory.
+    pub fn open_storage_vision(&mut self) {
+        let current_path = self.pane(self.active_pane).current_path().clone();
+        self.storage_vision.start_scan(current_path);
+        self.mode = Mode::StorageVision;
+    }
+
+    /// Toggles the active directory in or out of Favorites / Bookmarks.
+    pub fn toggle_favorite_for_current(&mut self) {
+        let path = self.pane(self.active_pane).current_path().clone();
+        if self.bookmarks.contains_path(&path) {
+            self.bookmarks.remove_by_path(&path);
+        } else {
+            self.bookmarks.add(path);
+        }
     }
 
     /// Opens a new tab in the active pane with the active tab's directory.
@@ -4573,6 +5763,8 @@ impl App {
         let closed = self.active_pane_mut().close_active_tab();
         if closed {
             self.refresh_preview();
+            self.last_sync_origin = SyncOrigin::FileManagerNavigation;
+            self.sync_terminal_to_directory();
         }
         closed
     }
@@ -4581,12 +5773,16 @@ impl App {
     pub fn next_tab_in_active_pane(&mut self) {
         self.active_pane_mut().next_tab();
         self.refresh_preview();
+        self.last_sync_origin = SyncOrigin::FileManagerNavigation;
+        self.sync_terminal_to_directory();
     }
 
     /// Switches to the previous tab in the active pane.
     pub fn previous_tab_in_active_pane(&mut self) {
         self.active_pane_mut().previous_tab();
         self.refresh_preview();
+        self.last_sync_origin = SyncOrigin::FileManagerNavigation;
+        self.sync_terminal_to_directory();
     }
 
     /// Selects tab `index` in pane `which`.
@@ -4594,6 +5790,8 @@ impl App {
         self.active_pane = which;
         self.pane_mut(which).select_tab(index);
         self.refresh_preview();
+        self.last_sync_origin = SyncOrigin::FileManagerNavigation;
+        self.sync_terminal_to_directory();
     }
 
     fn finish_modal_operation(&mut self, outcome: Result<(), OperationError>) {
@@ -4630,6 +5828,11 @@ impl App {
         } else {
             self.preview.clear();
         }
+        let left = self.left.current_path().clone();
+        let right = self.right.current_path().clone();
+        let prev = self.preview.path().map(|p| p.to_path_buf());
+        self.filesystem_watcher
+            .watch(&[left, right], prev.as_deref());
     }
 
     /// The search of the pane the application acts on.
@@ -4714,6 +5917,289 @@ impl App {
         self.pane(self.active_pane).cancel_search();
     }
 
+    /// Accessor for context menu state.
+    pub fn context_menu(&self) -> &ContextMenuState {
+        &self.context_menu
+    }
+
+    /// Mutable accessor for context menu state.
+    pub fn context_menu_mut(&mut self) -> &mut ContextMenuState {
+        &mut self.context_menu
+    }
+
+    /// Constructs a context menu tailored to the current selection in the active pane.
+    pub fn build_context_menu(&self, position: (u16, u16)) -> ContextMenuState {
+        let active = self.active_pane;
+        let paths = self.pane(active).effective_selected_paths();
+        let has_clipboard = !self.clipboard.is_empty();
+        let is_mac = crate::input::platform::Platform::current().is_mac();
+        let ctrl_cmd = if is_mac { "⌘" } else { "Ctrl+" };
+
+        let mut items = Vec::new();
+
+        if paths.len() > 1 {
+            // MULTIPLE ITEMS SELECTED
+            items.push(ContextMenuItem::Action {
+                action: Action::Copy,
+                label: "Copy Selected".to_string(),
+                shortcut: Some(format!("{ctrl_cmd}C")),
+            });
+            items.push(ContextMenuItem::Action {
+                action: Action::Cut,
+                label: "Cut Selected".to_string(),
+                shortcut: Some(format!("{ctrl_cmd}X")),
+            });
+            items.push(ContextMenuItem::Action {
+                action: Action::Delete,
+                label: "Delete Selected".to_string(),
+                shortcut: Some("Delete".to_string()),
+            });
+            items.push(ContextMenuItem::Action {
+                action: Action::GetInfo,
+                label: "Get Info".to_string(),
+                shortcut: Some(format!("{ctrl_cmd}I")),
+            });
+            items.push(ContextMenuItem::Separator);
+            items.push(ContextMenuItem::More {
+                label: "More".to_string(),
+                items: vec![
+                    ContextMenuItem::Action {
+                        action: Action::SelectAll,
+                        label: "Select All".to_string(),
+                        shortcut: Some(format!("{ctrl_cmd}A")),
+                    },
+                    ContextMenuItem::Action {
+                        action: Action::DeselectAll,
+                        label: "Deselect All".to_string(),
+                        shortcut: Some("U".to_string()),
+                    },
+                    ContextMenuItem::Action {
+                        action: Action::InvertSelection,
+                        label: "Invert Selection".to_string(),
+                        shortcut: Some("*".to_string()),
+                    },
+                ],
+            });
+        } else if let Some(path) = paths.first() {
+            let is_dir = self
+                .pane(active)
+                .selected_entry()
+                .map(Entry::is_dir)
+                .unwrap_or_else(|| path.is_dir());
+            if is_dir {
+                // FOLDER SELECTED
+                items.push(ContextMenuItem::Action {
+                    action: Action::Open,
+                    label: "Open Folder".to_string(),
+                    shortcut: Some("Enter".to_string()),
+                });
+                items.push(ContextMenuItem::Action {
+                    action: Action::Copy,
+                    label: "Copy".to_string(),
+                    shortcut: Some(format!("{ctrl_cmd}C")),
+                });
+                items.push(ContextMenuItem::Action {
+                    action: Action::Cut,
+                    label: "Cut".to_string(),
+                    shortcut: Some(format!("{ctrl_cmd}X")),
+                });
+                if has_clipboard {
+                    items.push(ContextMenuItem::Action {
+                        action: Action::Paste,
+                        label: "Paste".to_string(),
+                        shortcut: Some(format!("{ctrl_cmd}V")),
+                    });
+                }
+                items.push(ContextMenuItem::Action {
+                    action: Action::Rename,
+                    label: "Rename".to_string(),
+                    shortcut: Some("F2".to_string()),
+                });
+                items.push(ContextMenuItem::Action {
+                    action: Action::Delete,
+                    label: "Delete".to_string(),
+                    shortcut: Some("Delete".to_string()),
+                });
+                items.push(ContextMenuItem::Action {
+                    action: Action::GetInfo,
+                    label: "Get Info".to_string(),
+                    shortcut: Some(format!("{ctrl_cmd}I")),
+                });
+                items.push(ContextMenuItem::Separator);
+                items.push(ContextMenuItem::More {
+                    label: "More".to_string(),
+                    items: vec![
+                        ContextMenuItem::Action {
+                            action: Action::NewFile,
+                            label: "New File".to_string(),
+                            shortcut: Some("N".to_string()),
+                        },
+                        ContextMenuItem::Action {
+                            action: Action::NewDirectory,
+                            label: "New Folder".to_string(),
+                            shortcut: Some(if is_mac {
+                                "⇧⌘N".to_string()
+                            } else {
+                                "Ctrl+Shift+N".to_string()
+                            }),
+                        },
+                        ContextMenuItem::Action {
+                            action: Action::SelectAll,
+                            label: "Select All".to_string(),
+                            shortcut: Some(format!("{ctrl_cmd}A")),
+                        },
+                        ContextMenuItem::Action {
+                            action: Action::ToggleHidden,
+                            label: "Toggle Hidden Files".to_string(),
+                            shortcut: Some(".".to_string()),
+                        },
+                    ],
+                });
+            } else {
+                // FILE SELECTED
+                items.push(ContextMenuItem::Action {
+                    action: Action::Open,
+                    label: "Open".to_string(),
+                    shortcut: Some("Enter".to_string()),
+                });
+                items.push(ContextMenuItem::Action {
+                    action: Action::Preview,
+                    label: "Quick Preview".to_string(),
+                    shortcut: Some("Space".to_string()),
+                });
+                items.push(ContextMenuItem::Action {
+                    action: Action::Copy,
+                    label: "Copy".to_string(),
+                    shortcut: Some(format!("{ctrl_cmd}C")),
+                });
+                items.push(ContextMenuItem::Action {
+                    action: Action::Cut,
+                    label: "Cut".to_string(),
+                    shortcut: Some(format!("{ctrl_cmd}X")),
+                });
+                if has_clipboard {
+                    items.push(ContextMenuItem::Action {
+                        action: Action::Paste,
+                        label: "Paste".to_string(),
+                        shortcut: Some(format!("{ctrl_cmd}V")),
+                    });
+                }
+                items.push(ContextMenuItem::Action {
+                    action: Action::Rename,
+                    label: "Rename".to_string(),
+                    shortcut: Some("F2".to_string()),
+                });
+                items.push(ContextMenuItem::Action {
+                    action: Action::Delete,
+                    label: "Delete".to_string(),
+                    shortcut: Some("Delete".to_string()),
+                });
+                items.push(ContextMenuItem::Action {
+                    action: Action::GetInfo,
+                    label: "Get Info".to_string(),
+                    shortcut: Some(format!("{ctrl_cmd}I")),
+                });
+                items.push(ContextMenuItem::Separator);
+                items.push(ContextMenuItem::More {
+                    label: "More".to_string(),
+                    items: vec![
+                        ContextMenuItem::Action {
+                            action: Action::SelectAll,
+                            label: "Select All".to_string(),
+                            shortcut: Some(format!("{ctrl_cmd}A")),
+                        },
+                        ContextMenuItem::Action {
+                            action: Action::ToggleHidden,
+                            label: "Toggle Hidden Files".to_string(),
+                            shortcut: Some(".".to_string()),
+                        },
+                    ],
+                });
+            }
+        } else {
+            // EMPTY DIRECTORY AREA
+            items.push(ContextMenuItem::Action {
+                action: Action::NewDirectory,
+                label: "New Folder".to_string(),
+                shortcut: Some(if is_mac {
+                    "⇧⌘N".to_string()
+                } else {
+                    "Ctrl+Shift+N".to_string()
+                }),
+            });
+            items.push(ContextMenuItem::Action {
+                action: Action::NewFile,
+                label: "New File".to_string(),
+                shortcut: Some("N".to_string()),
+            });
+            if has_clipboard {
+                items.push(ContextMenuItem::Action {
+                    action: Action::Paste,
+                    label: "Paste".to_string(),
+                    shortcut: Some(format!("{ctrl_cmd}V")),
+                });
+            } else {
+                items.push(ContextMenuItem::Disabled {
+                    label: "Paste".to_string(),
+                    reason: Some("Clipboard empty".to_string()),
+                });
+            }
+            items.push(ContextMenuItem::Action {
+                action: Action::RefreshDirectory,
+                label: "Refresh".to_string(),
+                shortcut: Some(format!("{ctrl_cmd}R")),
+            });
+            items.push(ContextMenuItem::Separator);
+            items.push(ContextMenuItem::More {
+                label: "More".to_string(),
+                items: vec![
+                    ContextMenuItem::Action {
+                        action: Action::SelectAll,
+                        label: "Select All".to_string(),
+                        shortcut: Some(format!("{ctrl_cmd}A")),
+                    },
+                    ContextMenuItem::Action {
+                        action: Action::ToggleHidden,
+                        label: "Toggle Hidden Files".to_string(),
+                        shortcut: Some(".".to_string()),
+                    },
+                ],
+            });
+        }
+
+        ContextMenuState::new(items, position)
+    }
+
+    /// Opens the context menu at `position`.
+    pub fn open_context_menu(&mut self, position: (u16, u16)) {
+        self.context_menu = self.build_context_menu(position);
+        self.mode = Mode::ContextMenu;
+    }
+
+    /// Closes the context menu and returns to normal mode.
+    pub fn close_context_menu(&mut self) {
+        if self.mode == Mode::ContextMenu {
+            self.mode = Mode::Normal;
+        }
+        self.context_menu.is_more_open = false;
+        self.context_menu.items.clear();
+    }
+
+    /// Extends selection towards the start by `steps` in the active pane.
+    pub fn extend_selection_up(&mut self, steps: usize) {
+        self.active_pane_mut().extend_selection_up(steps);
+    }
+
+    /// Extends selection towards the end by `steps` in the active pane.
+    pub fn extend_selection_down(&mut self, steps: usize) {
+        self.active_pane_mut().extend_selection_down(steps);
+    }
+
+    /// Selects a contiguous range of entries to `target` in the given pane.
+    pub fn select_range_to(&mut self, pane: ActivePane, target: usize) {
+        self.pane_mut(pane).select_range_to(target);
+    }
+
     /// The user's settings.
     pub fn settings(&self) -> &SettingsState {
         &self.settings
@@ -4773,16 +6259,32 @@ impl App {
             .map(|b| BookmarkConfig::new(b.name(), b.path().to_path_buf()))
             .collect();
 
+        let recent_locations = self.recent_locations.locations().to_vec();
+        let recent_files = self.recent_locations.files().to_vec();
+        let reduced_motion = self.reduced_motion();
+        let theme = self.active_theme.id_str().to_string();
+
         Settings {
             active_pane,
             left_tabs,
             right_tabs,
             bookmarks,
+            recent_locations,
+            recent_files,
+            reduced_motion,
+            theme,
         }
     }
 
     /// Applies loaded settings into application state, validating filesystem paths non-destructively.
     pub fn apply_persistent_settings(&mut self, settings: &Settings) {
+        // 0. Reduced motion
+        self.set_reduced_motion(settings.reduced_motion);
+
+        // Theme
+        self.active_theme = ThemeRegistry::resolve_id(&settings.theme);
+        self.preview_theme = None;
+
         // 1. Active pane
         self.active_pane = match settings.active_pane {
             ActivePaneConfig::Left => ActivePane::Left,
@@ -4829,6 +6331,18 @@ impl App {
                     .right_tabs
                     .active_tab_index
                     .min(self.right.tabs.len() - 1);
+            }
+        }
+
+        // 5. Recent locations & files
+        for loc in &settings.recent_locations {
+            if loc.is_dir() {
+                self.recent_locations.record_directory(loc.clone());
+            }
+        }
+        for file in &settings.recent_files {
+            if file.is_file() {
+                self.recent_locations.record_file(file.clone());
             }
         }
 
@@ -5454,7 +6968,7 @@ mod tests {
         assert_eq!(app.preview().path(), Some(dir.as_path()));
         assert!(matches!(
             app.preview().content(),
-            Some(crate::preview::PreviewContent::Metadata(_))
+            Some(crate::preview::PreviewContent::Directory(_))
         ));
 
         // Cancel leaves preview mode and returns to normal mode with live preview
@@ -5729,6 +7243,9 @@ mod tests {
                     continue;
                 }
                 if mode == Mode::Bookmarks && action == Action::RemoveBookmark {
+                    continue;
+                }
+                if mode == Mode::Preview && action == Action::Preview {
                     continue;
                 }
 
@@ -11238,6 +12755,10 @@ mod tests {
                 BookmarkConfig::new("Deleted", deleted_dir.clone()),
                 BookmarkConfig::new("Valid", valid_dir.clone()),
             ],
+            recent_locations: Vec::new(),
+            recent_files: Vec::new(),
+            reduced_motion: false,
+            theme: "terminalvision".to_string(),
         };
 
         let mut app = App::at(valid_dir.clone()).expect("app loaded");

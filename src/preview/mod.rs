@@ -6,14 +6,20 @@
 //!
 //! This module is independent of terminal rendering, Crossterm, and Ratatui.
 
+pub mod archive;
+pub mod directory;
 pub mod image;
 pub mod language;
 pub mod metadata;
+pub mod pdf;
 pub mod syntax;
 
-pub use image::{ImageFormat, ImagePreview};
+pub use archive::{ArchiveEntry, ArchivePreview};
+pub use directory::DirectoryPreview;
+pub use image::{ImageFormat, ImagePreview, TerminalGraphicsProtocol};
 pub use language::Language;
 pub use metadata::{MetadataPreview, format_size, format_system_time, load_metadata_preview};
+pub use pdf::PdfPreview;
 pub use syntax::{StyledSpan, TokenKind, tokenize_line};
 
 use std::fs::{self, File};
@@ -101,16 +107,20 @@ pub fn line_number_width(total_lines: usize) -> usize {
 /// The structured result of preparing a preview for a filesystem entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewContent {
-    /// The entry is a directory.
-    Directory,
+    /// A structured directory summary preview.
+    Directory(DirectoryPreview),
     /// The file is empty (0 bytes).
     Empty,
     /// A successfully prepared text/code preview.
     Text(TextPreview),
-    /// A structured metadata preview (for directories, symlinks, binary/unsupported files).
+    /// A structured metadata preview (for symlinks, binary/unsupported files).
     Metadata(MetadataPreview),
     /// A structured image file preview.
     Image(ImagePreview),
+    /// A structured PDF file preview.
+    Pdf(PdfPreview),
+    /// A structured archive file contents preview.
+    Archive(ArchivePreview),
     /// The file extension is not supported for text preview.
     UnsupportedExtension(String),
     /// The file contains binary content (e.g., null bytes).
@@ -144,6 +154,45 @@ impl PreviewContent {
     pub fn as_image(&self) -> Option<&ImagePreview> {
         match self {
             Self::Image(preview) => Some(preview),
+            _ => None,
+        }
+    }
+
+    /// Whether the preview represents a PDF.
+    pub fn is_pdf(&self) -> bool {
+        matches!(self, Self::Pdf(_))
+    }
+
+    /// Returns the PDF preview if available.
+    pub fn as_pdf(&self) -> Option<&PdfPreview> {
+        match self {
+            Self::Pdf(preview) => Some(preview),
+            _ => None,
+        }
+    }
+
+    /// Whether the preview represents an archive.
+    pub fn is_archive(&self) -> bool {
+        matches!(self, Self::Archive(_))
+    }
+
+    /// Returns the archive preview if available.
+    pub fn as_archive(&self) -> Option<&ArchivePreview> {
+        match self {
+            Self::Archive(preview) => Some(preview),
+            _ => None,
+        }
+    }
+
+    /// Whether the preview represents a directory.
+    pub fn is_directory(&self) -> bool {
+        matches!(self, Self::Directory(_))
+    }
+
+    /// Returns the directory preview if available.
+    pub fn as_directory(&self) -> Option<&DirectoryPreview> {
+        match self {
+            Self::Directory(preview) => Some(preview),
             _ => None,
         }
     }
@@ -248,12 +297,12 @@ pub fn sanitize_line(raw: &str) -> String {
     sanitized
 }
 
-/// Loads and prepares a read-only preview for the file at `path`.
+/// Loads and prepares a read-only preview for the file or directory at `path`.
 ///
 /// This function:
 /// - Never executes the file or invokes any shells.
 /// - Never writes to or modifies the file.
-/// - Reads at most [`MAX_PREVIEW_BYTES`].
+/// - Reads at most [`MAX_PREVIEW_BYTES`] for text inspection.
 /// - Performs binary and UTF-8 safety checks.
 pub fn load_preview(path: &Path) -> PreviewContent {
     let sym_meta = match fs::symlink_metadata(path) {
@@ -261,10 +310,20 @@ pub fn load_preview(path: &Path) -> PreviewContent {
         Err(err) => return PreviewContent::Error(err.to_string()),
     };
 
-    if sym_meta.file_type().is_symlink() || sym_meta.is_dir() {
+    if sym_meta.file_type().is_symlink() {
         return match MetadataPreview::from_path(path) {
             Ok(meta) => PreviewContent::Metadata(meta),
             Err(err) => PreviewContent::Error(err),
+        };
+    }
+
+    if sym_meta.is_dir() {
+        return match DirectoryPreview::from_path(path) {
+            Ok(dir_preview) => PreviewContent::Directory(dir_preview),
+            Err(_) => match MetadataPreview::from_path(path) {
+                Ok(meta) => PreviewContent::Metadata(meta),
+                Err(err) => PreviewContent::Error(err),
+            },
         };
     }
 
@@ -279,20 +338,70 @@ pub fn load_preview(path: &Path) -> PreviewContent {
     }
 
     let language = Language::from_path(path);
+    let path_str = path.to_string_lossy().to_ascii_lowercase();
 
     // Check extension if present.
     if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
         let ext_lower = ext.to_ascii_lowercase();
+
+        // PDF
+        if ext_lower == "pdf" {
+            return match PdfPreview::from_path(path) {
+                Ok(pdf) => PreviewContent::Pdf(pdf),
+                Err(err) => PreviewContent::Error(err),
+            };
+        }
+
+        // Archives
         if matches!(
             ext_lower.as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+            "zip" | "tar" | "tgz" | "gz" | "bz2" | "xz" | "7z"
+        ) || path_str.ends_with(".tar.gz")
+            || path_str.ends_with(".tar.bz2")
+            || path_str.ends_with(".tar.xz")
+        {
+            return match ArchivePreview::from_path(path) {
+                Ok(arc) => PreviewContent::Archive(arc),
+                Err(err) => PreviewContent::Error(err),
+            };
+        }
+
+        // Images
+        if matches!(
+            ext_lower.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
         ) {
             return match ImagePreview::from_path(path) {
                 Ok(img) => PreviewContent::Image(img),
                 Err(err) => PreviewContent::Error(err),
             };
         }
+
         if !is_supported_text_extension(ext) {
+            // Check magic bytes for PDF/Image/Archive before declaring unsupported
+            if let Ok(mut f) = File::open(path) {
+                let mut magic = [0u8; 16];
+                if let Ok(n) = f.read(&mut magic)
+                    && n >= 4
+                {
+                    if magic.starts_with(b"%PDF-") {
+                        if let Ok(pdf) = PdfPreview::from_path(path) {
+                            return PreviewContent::Pdf(pdf);
+                        }
+                    } else if magic.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
+                        if let Ok(arc) = ArchivePreview::from_path(path) {
+                            return PreviewContent::Archive(arc);
+                        }
+                    } else if (magic.starts_with(&[0x89, 0x50, 0x4E, 0x47])
+                        || magic.starts_with(&[0xFF, 0xD8, 0xFF])
+                        || magic.starts_with(b"GIF8")
+                        || magic.starts_with(b"BM"))
+                        && let Ok(img) = ImagePreview::from_path(path)
+                    {
+                        return PreviewContent::Image(img);
+                    }
+                }
+            }
             return PreviewContent::UnsupportedExtension(ext.to_string());
         }
     }
@@ -598,8 +707,8 @@ mod tests {
     fn test_21_directory_selected() {
         let temp = TempDir::new("preview-dir");
         let preview = load_preview(temp.path());
-        let meta = preview.as_metadata().expect("must be metadata preview");
-        assert_eq!(meta.kind(), crate::filesystem::entry::EntryKind::Directory);
+        let dir = preview.as_directory().expect("must be directory preview");
+        assert_eq!(dir.item_count, 0);
     }
 
     #[test]

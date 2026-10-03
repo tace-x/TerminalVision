@@ -641,13 +641,14 @@ impl TerminalEmulator {
     fn execute_osc(&mut self) {
         if self.osc_buffer.starts_with("7;") {
             let uri = &self.osc_buffer[2..];
-            if let Some(path_part) = uri.strip_prefix("file://")
-                && let Some(slash_idx) = path_part.find('/')
-            {
-                let path_str = &path_part[slash_idx..];
-                self.tracked_cwd = Some(PathBuf::from(path_str));
+            if let Some(path) = decode_osc7_file_uri(uri) {
+                let normalized = crate::utils::path::normalize_path(&path);
+                if normalized.is_absolute() {
+                    self.tracked_cwd = Some(normalized);
+                }
             }
         }
+        self.osc_buffer.clear();
     }
 
     /// Resets the terminal emulator state.
@@ -756,6 +757,40 @@ impl TerminalEmulator {
     /// Current working directory reported by shell via OSC 7.
     pub fn tracked_cwd(&self) -> Option<&PathBuf> {
         self.tracked_cwd.as_ref()
+    }
+}
+
+/// Decodes an OSC 7 file URI (e.g. `file://hostname/path` or `file:///path%20with%20spaces`) into a `PathBuf`.
+pub fn decode_osc7_file_uri(uri: &str) -> Option<PathBuf> {
+    let path_part = uri.strip_prefix("file://")?;
+    let path_str = if let Some(slash_idx) = path_part.find('/') {
+        &path_part[slash_idx..]
+    } else {
+        path_part
+    };
+
+    let mut decoded_bytes = Vec::with_capacity(path_str.len());
+    let mut bytes = path_str.as_bytes().iter();
+
+    while let Some(&b) = bytes.next() {
+        if b == b'%' {
+            let h1 = bytes.next()?;
+            let h2 = bytes.next()?;
+            let hex_bytes = [*h1, *h2];
+            let hex_str = std::str::from_utf8(&hex_bytes).ok()?;
+            let byte_val = u8::from_str_radix(hex_str, 16).ok()?;
+            decoded_bytes.push(byte_val);
+        } else {
+            decoded_bytes.push(b);
+        }
+    }
+
+    let decoded_str = String::from_utf8(decoded_bytes).ok()?;
+    let trimmed = decoded_str.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
     }
 }
 

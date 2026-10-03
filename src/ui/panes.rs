@@ -92,19 +92,26 @@ pub fn render(frame: &mut Frame, layout: MainLayout, app: &App) {
     }
 }
 
-/// Builds the title Line and hit ranges for a pane's header.
-///
-/// Returns `(Line, hit_ranges)` where each hit range is `(tab_index, relative_start_x, relative_end_x)`.
+/// Builds the title Line and hit ranges for a pane's header using the default theme.
 pub fn build_pane_title(
     area_width: u16,
     pane: &Pane,
     is_active: bool,
 ) -> (Line<'static>, Vec<(usize, u16, u16)>) {
+    build_pane_title_with_theme(area_width, pane, is_active, &Theme::default())
+}
+
+/// Builds the title Line and hit ranges for a pane's header using a specific theme.
+pub fn build_pane_title_with_theme(
+    area_width: u16,
+    pane: &Pane,
+    is_active: bool,
+    theme: &Theme,
+) -> (Line<'static>, Vec<(usize, u16, u16)>) {
     if area_width < 4 {
         return (Line::default(), Vec::new());
     }
 
-    let theme = Theme::default();
     let tabs = pane.tabs();
     let active_tab_idx = pane.active_tab_index();
 
@@ -237,11 +244,11 @@ fn render_pane(frame: &mut Frame, area: Rect, app: &App, which: ActivePane, is_a
         return;
     }
 
-    let theme = Theme::default();
+    let theme = app.theme();
     let pane = app.pane(which);
 
     let (border_type, border_style) = theme.pane_border(is_active);
-    let (title_line, _) = build_pane_title(area.width, pane, is_active);
+    let (title_line, _) = build_pane_title_with_theme(area.width, pane, is_active, &theme);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -256,7 +263,7 @@ fn render_pane(frame: &mut Frame, area: Rect, app: &App, which: ActivePane, is_a
         return;
     }
 
-    file_list::render(frame, inner, pane, is_active);
+    file_list::render_with_theme(frame, inner, pane, is_active, &theme);
 }
 
 #[cfg(test)]
@@ -352,8 +359,8 @@ mod tests {
             .flat_map(|y| (0..60).map(move |x| buffer[(x, y)].symbol().to_string()))
             .collect();
         assert!(
-            all_text.contains("Empty directory"),
-            "empty pane must show 'Empty directory'"
+            all_text.contains("Nothing here yet"),
+            "empty pane must show 'Nothing here yet'"
         );
     }
 

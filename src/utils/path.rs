@@ -123,6 +123,39 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Finds a safe existing fallback directory when a path has been deleted or is inaccessible.
+pub fn safe_fallback_directory(path: &Path) -> PathBuf {
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if parent.exists() && parent.is_dir() {
+            return parent.to_path_buf();
+        }
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    if let Some(home) = home_dir()
+        && home.exists()
+        && home.is_dir()
+    {
+        return home;
+    }
+    filesystem_root(path)
+}
+
+/// Checks whether two filesystem paths point to the exact same physical location,
+/// handling symlinks (such as `/var` -> `/private/var` on macOS) gracefully.
+pub fn paths_are_equivalent(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    if let (Ok(ca), Ok(cb)) = (a.canonicalize(), b.canonicalize()) {
+        return ca == cb;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

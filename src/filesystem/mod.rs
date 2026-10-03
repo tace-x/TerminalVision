@@ -1,8 +1,15 @@
+pub mod classification;
 pub mod entry;
 pub mod error;
 pub mod metadata;
 pub mod navigation;
 pub mod operations;
+pub mod watcher;
+
+pub use self::classification::{
+    FileCategory, FileIntelligence, classify_file_by_extension_and_magic,
+};
+pub use self::watcher::{FilesystemChange, FilesystemWatcher};
 
 use std::io;
 use std::path::{Path, PathBuf};

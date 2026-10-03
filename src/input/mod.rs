@@ -7,6 +7,13 @@
 
 pub mod keyboard;
 pub mod mouse;
+pub mod platform;
+pub mod shortcut;
+
+pub use platform::Platform;
+pub use shortcut::{
+    KeyChord, Modifiers, ShortcutBinding, ShortcutConflict, ShortcutFormatter, ShortcutRegistry,
+};
 
 use std::io;
 use std::time::Duration;
@@ -48,6 +55,10 @@ pub enum InputEvent {
     ModalNavigateUp,
     /// Navigate down in a modal list (e.g. command palette).
     ModalNavigateDown,
+    /// Navigate left / collapse submenu in a modal.
+    ModalNavigateLeft,
+    /// Navigate right / expand submenu in a modal.
+    ModalNavigateRight,
     /// Toggle selected option in a confirmation dialog.
     ModalToggle,
     /// Explicitly choose Yes or No in a confirmation dialog.

@@ -1,51 +1,136 @@
-//! Command palette registry and search filtering.
+//! Command Center registry, search filtering, and action dispatching.
 //!
-//! Provides a searchable list of application commands mapping directly to [`Action`]s.
-//! This module never performs filesystem operations or state mutations directly.
+//! Provides a unified search interface across application actions and accessible filesystem entries.
+//! All commands and keyboard shortcuts are generated directly from the centralized [`ActionRegistry`]
+//! and [`ShortcutRegistry`].
 
-use crate::app::actions::{Action, ActionCategory};
+use std::path::PathBuf;
 
-/// A command available in the command palette.
+use crate::app::actions::{Action, ActionCategory, ActionRegistry};
+use crate::commands::fuzzy::{fuzzy_match, fuzzy_match_multi};
+use crate::input::platform::Platform;
+use crate::input::shortcut::ShortcutRegistry;
+
+/// A command item available in the Command Center.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Command {
-    /// The user-visible name of the command.
-    name: &'static str,
-    /// A short description of what the command does.
-    description: &'static str,
-    /// The action this command produces.
+    /// The action this command triggers.
     action: Action,
-    /// The category this command belongs to.
-    category: ActionCategory,
-    /// The default keyboard shortcut for this command, if any.
-    shortcut: Option<&'static str>,
 }
 
 impl Command {
-    /// Creates a new command definition.
+    /// Every registered application command.
+    pub const ALL: &'static [Command] = &[
+        Command::new_with_action(Action::MoveUp),
+        Command::new_with_action(Action::MoveDown),
+        Command::new_with_action(Action::MoveLeft),
+        Command::new_with_action(Action::MoveRight),
+        Command::new_with_action(Action::Open),
+        Command::new_with_action(Action::GoParent),
+        Command::new_with_action(Action::GoHome),
+        Command::new_with_action(Action::GoEnd),
+        Command::new_with_action(Action::PageUp),
+        Command::new_with_action(Action::PageDown),
+        Command::new_with_action(Action::SwitchPane),
+        Command::new_with_action(Action::GoBack),
+        Command::new_with_action(Action::GoForward),
+        Command::new_with_action(Action::JumpToPath),
+        Command::new_with_action(Action::SmartJump),
+        Command::new_with_action(Action::GoHomeDir),
+        Command::new_with_action(Action::GoRootDir),
+        Command::new_with_action(Action::GoGitRoot),
+        Command::new_with_action(Action::GoProjectRoot),
+        Command::new_with_action(Action::RevealContext),
+        Command::new_with_action(Action::NewTab),
+        Command::new_with_action(Action::CloseTab),
+        Command::new_with_action(Action::NextTab),
+        Command::new_with_action(Action::PreviousTab),
+        Command::new_with_action(Action::DuplicateTab),
+        Command::new_with_action(Action::NewFile),
+        Command::new_with_action(Action::NewDirectory),
+        Command::new_with_action(Action::Rename),
+        Command::new_with_action(Action::Copy),
+        Command::new_with_action(Action::Cut),
+        Command::new_with_action(Action::Paste),
+        Command::new_with_action(Action::Delete),
+        Command::new_with_action(Action::ToggleSelect),
+        Command::new_with_action(Action::SelectRangeUp),
+        Command::new_with_action(Action::SelectRangeDown),
+        Command::new_with_action(Action::SelectAll),
+        Command::new_with_action(Action::DeselectAll),
+        Command::new_with_action(Action::InvertSelection),
+        Command::new_with_action(Action::ContextMenu),
+        Command::new_with_action(Action::GetInfo),
+        Command::new_with_action(Action::ToggleHidden),
+        Command::new_with_action(Action::ChangeSort),
+        Command::new_with_action(Action::RefreshDirectory),
+        Command::new_with_action(Action::FileRadar),
+        Command::new_with_action(Action::ToggleFocusMode),
+        Command::new_with_action(Action::Preview),
+        Command::new_with_action(Action::StartSearch),
+        Command::new_with_action(Action::ClearSearch),
+        Command::new_with_action(Action::CycleSearchMode),
+        Command::new_with_action(Action::Quit),
+        Command::new_with_action(Action::Help),
+        Command::new_with_action(Action::CommandPalette),
+        Command::new_with_action(Action::Cancel),
+        Command::new_with_action(Action::AddBookmark),
+        Command::new_with_action(Action::OpenBookmarks),
+        Command::new_with_action(Action::RemoveBookmark),
+        Command::new_with_action(Action::GitStatus),
+        Command::new_with_action(Action::GitStatusPanel),
+        Command::new_with_action(Action::ProjectCockpit),
+        Command::new_with_action(Action::OpenManifest),
+        Command::new_with_action(Action::OpenReadme),
+        Command::new_with_action(Action::OpenLicense),
+        Command::new_with_action(Action::GoSourceDir),
+        Command::new_with_action(Action::ToggleTerminalFocus),
+        Command::new_with_action(Action::FocusTerminal),
+        Command::new_with_action(Action::FocusFileManager),
+        Command::new_with_action(Action::SyncTerminalToDirectory),
+        Command::new_with_action(Action::SyncDirectoryToTerminal),
+        Command::new_with_action(Action::ScrollTerminalUp),
+        Command::new_with_action(Action::ScrollTerminalDown),
+        Command::new_with_action(Action::StorageVision),
+        Command::new_with_action(Action::ThemeSelector),
+        Command::new_with_action(Action::NextTheme),
+        Command::new_with_action(Action::PrevTheme),
+        Command::new_with_action(Action::ToggleFavorite),
+        Command::new_with_action(Action::RenameFavorite),
+        Command::new_with_action(Action::MoveFavoriteUp),
+        Command::new_with_action(Action::MoveFavoriteDown),
+    ];
+
+    /// Creates a new command for `action`.
+    pub const fn new_with_action(action: Action) -> Self {
+        Self { action }
+    }
+
+    /// Backwards-compatible constructor.
     pub const fn new(
-        name: &'static str,
-        description: &'static str,
+        _name: &'static str,
+        _description: &'static str,
         action: Action,
-        category: ActionCategory,
-        shortcut: Option<&'static str>,
+        _category: ActionCategory,
+        _shortcut: Option<&'static str>,
     ) -> Self {
-        Self {
-            name,
-            description,
-            action,
-            category,
-            shortcut,
-        }
+        Self { action }
     }
 
     /// The display name of the command.
-    pub const fn name(&self) -> &'static str {
-        self.name
+    pub fn name(&self) -> &'static str {
+        ActionRegistry::global()
+            .get(self.action)
+            .map(|m| m.name)
+            .unwrap_or("Unknown")
     }
 
     /// The description of the command.
-    pub const fn description(&self) -> &'static str {
-        self.description
+    pub fn description(&self) -> &'static str {
+        ActionRegistry::global()
+            .get(self.action)
+            .map(|m| m.description)
+            .unwrap_or("")
     }
 
     /// The action this command triggers.
@@ -55,500 +140,378 @@ impl Command {
 
     /// The category of this command.
     pub const fn category(&self) -> ActionCategory {
-        self.category
+        self.action.category()
     }
 
-    /// The default keyboard shortcut for this command.
-    pub const fn shortcut(&self) -> Option<&'static str> {
-        self.shortcut
+    /// The default keyboard shortcut for this command formatted for the current host platform.
+    pub fn shortcut(&self) -> Option<String> {
+        self.shortcut_for_platform(Platform::current())
     }
 
-    /// The registry of all available commands in the command palette.
-    pub const ALL: &'static [Command] = &[
-        // NAVIGATION
-        Command::new(
-            "Open",
-            "Open selected directory",
-            Action::Open,
-            ActionCategory::Navigation,
-            Some("Enter"),
-        ),
-        Command::new(
-            "Go Parent",
-            "Navigate to parent directory",
-            Action::GoParent,
-            ActionCategory::Navigation,
-            Some("Backspace"),
-        ),
-        Command::new(
-            "Switch Pane",
-            "Switch active file pane",
-            Action::SwitchPane,
-            ActionCategory::Navigation,
-            Some("Tab"),
-        ),
-        Command::new(
-            "Go to Path",
-            "Navigate directly to typed path",
-            Action::JumpToPath,
-            ActionCategory::Navigation,
-            Some("g"),
-        ),
-        Command::new(
-            "Smart Jump",
-            "Quick jump to bookmarks, roots, or recent folders",
-            Action::SmartJump,
-            ActionCategory::Navigation,
-            Some("J"),
-        ),
-        Command::new(
-            "Jump to Home",
-            "Navigate directly to home directory",
-            Action::GoHomeDir,
-            ActionCategory::Navigation,
-            Some("~"),
-        ),
-        Command::new(
-            "Jump to Root",
-            "Navigate to filesystem root directory",
-            Action::GoRootDir,
-            ActionCategory::Navigation,
-            None,
-        ),
-        Command::new(
-            "Go Back",
-            "Navigate back in tab history",
-            Action::GoBack,
-            ActionCategory::Navigation,
-            Some("Alt+Left"),
-        ),
-        Command::new(
-            "Go Forward",
-            "Navigate forward in tab history",
-            Action::GoForward,
-            ActionCategory::Navigation,
-            Some("Alt+Right"),
-        ),
-        Command::new(
-            "Jump to First Entry",
-            "Scroll to first entry in active pane",
-            Action::GoHome,
-            ActionCategory::Navigation,
-            Some("Home"),
-        ),
-        Command::new(
-            "Jump to Last Entry",
-            "Scroll to last entry in active pane",
-            Action::GoEnd,
-            ActionCategory::Navigation,
-            Some("End"),
-        ),
-        Command::new(
-            "Page Up",
-            "Scroll up by one visible page",
-            Action::PageUp,
-            ActionCategory::Navigation,
-            Some("PgUp"),
-        ),
-        Command::new(
-            "Page Down",
-            "Scroll down by one visible page",
-            Action::PageDown,
-            ActionCategory::Navigation,
-            Some("PgDn"),
-        ),
-        Command::new(
-            "Reveal Context",
-            "Show hierarchical context tree for selected item",
-            Action::RevealContext,
-            ActionCategory::Navigation,
-            Some("C"),
-        ),
-        // TABS
-        Command::new(
-            "New Tab",
-            "Open a new tab in active pane",
-            Action::NewTab,
-            ActionCategory::Tabs,
-            Some("t"),
-        ),
-        Command::new(
-            "Close Tab",
-            "Close the active tab",
-            Action::CloseTab,
-            ActionCategory::Tabs,
-            Some("w"),
-        ),
-        Command::new(
-            "Next Tab",
-            "Switch to next tab",
-            Action::NextTab,
-            ActionCategory::Tabs,
-            Some("]"),
-        ),
-        Command::new(
-            "Previous Tab",
-            "Switch to previous tab",
-            Action::PreviousTab,
-            ActionCategory::Tabs,
-            Some("["),
-        ),
-        Command::new(
-            "Duplicate Tab",
-            "Duplicate active tab in active pane",
-            Action::DuplicateTab,
-            ActionCategory::Tabs,
-            Some("T"),
-        ),
-        // FILES
-        Command::new(
-            "New File",
-            "Create a new file",
-            Action::NewFile,
-            ActionCategory::Files,
-            Some("n"),
-        ),
-        Command::new(
-            "New Directory",
-            "Create a new directory",
-            Action::NewDirectory,
-            ActionCategory::Files,
-            Some("N"),
-        ),
-        Command::new(
-            "Rename",
-            "Rename selected entry",
-            Action::Rename,
-            ActionCategory::Files,
-            Some("r"),
-        ),
-        Command::new(
-            "Copy",
-            "Copy selected entry to clipboard",
-            Action::Copy,
-            ActionCategory::Files,
-            Some("y"),
-        ),
-        Command::new(
-            "Cut",
-            "Cut selected entry to clipboard",
-            Action::Cut,
-            ActionCategory::Files,
-            Some("x"),
-        ),
-        Command::new(
-            "Paste",
-            "Paste copied or cut entries",
-            Action::Paste,
-            ActionCategory::Files,
-            Some("p"),
-        ),
-        Command::new(
-            "Delete",
-            "Delete selected entry",
-            Action::Delete,
-            ActionCategory::Files,
-            Some("d"),
-        ),
-        Command::new(
-            "Toggle Select",
-            "Toggle selection of current item",
-            Action::ToggleSelect,
-            ActionCategory::Files,
-            Some("Space"),
-        ),
-        Command::new(
-            "Select All",
-            "Select all items in directory",
-            Action::SelectAll,
-            ActionCategory::Files,
-            Some("Ctrl+A"),
-        ),
-        Command::new(
-            "Deselect All",
-            "Clear all selected items",
-            Action::DeselectAll,
-            ActionCategory::Files,
-            Some("u"),
-        ),
-        Command::new(
-            "Invert Selection",
-            "Invert item selection",
-            Action::InvertSelection,
-            ActionCategory::Files,
-            Some("*"),
-        ),
-        // SEARCH
-        Command::new(
-            "Search",
-            "Search files in current directory",
-            Action::StartSearch,
-            ActionCategory::Search,
-            Some("/"),
-        ),
-        Command::new(
-            "Clear Search",
-            "Clear active search query and results",
-            Action::ClearSearch,
-            ActionCategory::Search,
-            Some("Esc"),
-        ),
-        Command::new(
-            "Cycle Search Mode",
-            "Cycle between Basic, Recursive, Fuzzy, and Recursive+Fuzzy",
-            Action::CycleSearchMode,
-            ActionCategory::Search,
-            Some("Tab in Search"),
-        ),
-        // BOOKMARKS
-        Command::new(
-            "Add Bookmark",
-            "Bookmark current directory",
-            Action::AddBookmark,
-            ActionCategory::Bookmarks,
-            Some("b"),
-        ),
-        Command::new(
-            "Open Bookmarks",
-            "Show saved directory bookmarks",
-            Action::OpenBookmarks,
-            ActionCategory::Bookmarks,
-            Some("B"),
-        ),
-        Command::new(
-            "Remove Bookmark",
-            "Remove selected bookmark",
-            Action::RemoveBookmark,
-            ActionCategory::Bookmarks,
-            Some("d in Bookmarks"),
-        ),
-        // VIEW
-        Command::new(
-            "Toggle Hidden",
-            "Show or hide hidden files",
-            Action::ToggleHidden,
-            ActionCategory::View,
-            Some("."),
-        ),
-        Command::new(
-            "Change Sort",
-            "Cycle sorting mode (Name, Size, Modified, Kind)",
-            Action::ChangeSort,
-            ActionCategory::View,
-            Some("s"),
-        ),
-        Command::new(
-            "File Radar",
-            "Directory metrics and extension distribution",
-            Action::FileRadar,
-            ActionCategory::View,
-            Some("F"),
-        ),
-        Command::new(
-            "Toggle Focus Mode",
-            "Toggle distraction-free full-width focus mode",
-            Action::ToggleFocusMode,
-            ActionCategory::View,
-            Some("Z"),
-        ),
-        // PREVIEW
-        Command::new(
-            "Preview",
-            "Toggle file preview pane",
-            Action::Preview,
-            ActionCategory::Preview,
-            Some("v"),
-        ),
-        // GIT
-        Command::new(
-            "Jump to Git Root",
-            "Navigate to current Git repository root",
-            Action::GoGitRoot,
-            ActionCategory::Git,
-            None,
-        ),
-        Command::new(
-            "Git Status",
-            "Show repository status and branch info",
-            Action::GitStatus,
-            ActionCategory::Git,
-            None,
-        ),
-        Command::new(
-            "Git Status Panel",
-            "Open Git status overview and changed file list",
-            Action::GitStatusPanel,
-            ActionCategory::Git,
-            Some("G"),
-        ),
-        // PROJECT
-        Command::new(
-            "Jump to Project Root",
-            "Navigate to current detected project root",
-            Action::GoProjectRoot,
-            ActionCategory::Project,
-            None,
-        ),
-        Command::new(
-            "Project Cockpit",
-            "Open project overview and quick developer actions",
-            Action::ProjectCockpit,
-            ActionCategory::Project,
-            Some("P"),
-        ),
-        Command::new(
-            "Open Manifest",
-            "Open project build manifest (Cargo.toml, package.json, etc.)",
-            Action::OpenManifest,
-            ActionCategory::Project,
-            None,
-        ),
-        Command::new(
-            "Open README",
-            "Open project README documentation",
-            Action::OpenReadme,
-            ActionCategory::Project,
-            None,
-        ),
-        Command::new(
-            "Open License",
-            "Open project LICENSE file",
-            Action::OpenLicense,
-            ActionCategory::Project,
-            None,
-        ),
-        Command::new(
-            "Go to Source Directory",
-            "Navigate to project primary source directory (src/, etc.)",
-            Action::GoSourceDir,
-            ActionCategory::Project,
-            None,
-        ),
-        Command::new(
-            "Refresh Directory",
-            "Refresh listing of the active directory",
-            Action::RefreshDirectory,
-            ActionCategory::View,
-            Some("r / F5"),
-        ),
-        // TERMINAL
-        Command::new(
-            "Toggle Terminal Focus",
-            "Switch focus between File Manager and Terminal",
-            Action::ToggleTerminalFocus,
-            ActionCategory::Terminal,
-            Some("Ctrl+T"),
-        ),
-        Command::new(
-            "Focus Terminal",
-            "Switch keyboard focus to embedded interactive terminal",
-            Action::FocusTerminal,
-            ActionCategory::Terminal,
-            Some("Ctrl+T"),
-        ),
-        Command::new(
-            "Focus File Manager",
-            "Switch keyboard focus to file manager panes",
-            Action::FocusFileManager,
-            ActionCategory::Terminal,
-            Some("Ctrl+T"),
-        ),
-        Command::new(
-            "Sync Terminal to Directory",
-            "Change embedded terminal shell directory to active file pane",
-            Action::SyncTerminalToDirectory,
-            ActionCategory::Terminal,
-            None,
-        ),
-        Command::new(
-            "Sync Directory to Terminal",
-            "Navigate file manager active pane to terminal working directory",
-            Action::SyncDirectoryToTerminal,
-            ActionCategory::Terminal,
-            None,
-        ),
-        Command::new(
-            "Scroll Terminal Up",
-            "Scroll terminal scrollback history upward",
-            Action::ScrollTerminalUp,
-            ActionCategory::Terminal,
-            None,
-        ),
-        Command::new(
-            "Scroll Terminal Down",
-            "Scroll terminal scrollback history downward",
-            Action::ScrollTerminalDown,
-            ActionCategory::Terminal,
-            None,
-        ),
-        // APPLICATION
-        Command::new(
-            "Command Palette",
-            "Search and run commands",
-            Action::CommandPalette,
-            ActionCategory::Application,
-            Some("Ctrl+P"),
-        ),
-        Command::new(
-            "Help",
-            "Show help and keyboard shortcuts",
-            Action::Help,
-            ActionCategory::Application,
-            Some("?"),
-        ),
-        Command::new(
-            "Quit",
-            "Quit TerminalVision",
-            Action::Quit,
-            ActionCategory::Application,
-            Some("q"),
-        ),
-    ];
+    /// The keyboard shortcut formatted for a specific [`Platform`].
+    pub fn shortcut_for_platform(&self, platform: Platform) -> Option<String> {
+        ShortcutRegistry::global().primary_shortcut(self.action, platform)
+    }
+
+    /// Returns a slice of all available commands.
+    pub const fn all() -> &'static [Command] {
+        Self::ALL
+    }
 }
 
-/// Filters the static command registry based on `query`.
-///
-/// If `query` is empty (or whitespace-only), returns all commands in original order.
-/// Otherwise, performs a case-insensitive match on command names, descriptions, categories, and shortcuts.
-pub fn filter_commands(query: &str) -> Vec<&'static Command> {
+/// A search result item inside the Command Center (either an executable Action or a File/Folder navigation target).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandCenterEntry {
+    /// An executable semantic Action.
+    Action(Command),
+    /// A filesystem file or directory navigation target.
+    FileTarget {
+        title: String,
+        path: PathBuf,
+        is_dir: bool,
+    },
+}
+
+impl CommandCenterEntry {
+    /// Creates an action entry.
+    pub const fn from_action(action: Action) -> Self {
+        Self::Action(Command::new_with_action(action))
+    }
+
+    /// The display title of the entry.
+    pub fn title(&self) -> String {
+        match self {
+            Self::Action(cmd) => cmd.name().to_string(),
+            Self::FileTarget { title, .. } => title.clone(),
+        }
+    }
+
+    /// The description or path of the entry.
+    pub fn description(&self) -> String {
+        match self {
+            Self::Action(cmd) => cmd.description().to_string(),
+            Self::FileTarget { path, .. } => path.display().to_string(),
+        }
+    }
+
+    /// Category badge for display.
+    pub fn category_badge(&self) -> &'static str {
+        match self {
+            Self::Action(cmd) => match cmd.category() {
+                ActionCategory::Navigation => "[NAV]",
+                ActionCategory::Files => "[FILES]",
+                ActionCategory::Search => "[SEARCH]",
+                ActionCategory::Tabs => "[TABS]",
+                ActionCategory::Bookmarks => "[BOOK]",
+                ActionCategory::View => "[VIEW]",
+                ActionCategory::Preview => "[PREV]",
+                ActionCategory::Git => "[GIT]",
+                ActionCategory::Project => "[PROJ]",
+                ActionCategory::Terminal => "[TERM]",
+                ActionCategory::Application => "[APP]",
+            },
+            Self::FileTarget { is_dir: true, .. } => "[DIR]",
+            Self::FileTarget { is_dir: false, .. } => "[FILE]",
+        }
+    }
+
+    /// Associated shortcut display string if this is an action.
+    pub fn shortcut(&self, platform: Platform) -> Option<String> {
+        match self {
+            Self::Action(cmd) => cmd.shortcut_for_platform(platform),
+            Self::FileTarget { .. } => None,
+        }
+    }
+
+    /// The underlying action if this is an action entry.
+    pub fn action(&self) -> Option<Action> {
+        match self {
+            Self::Action(cmd) => Some(cmd.action()),
+            Self::FileTarget { .. } => None,
+        }
+    }
+
+    /// The filesystem path if this is a file entry.
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Action(_) => None,
+            Self::FileTarget { path, .. } => Some(path),
+        }
+    }
+}
+
+/// Contextual state information for filtering and prioritizing actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextFilter {
+    pub has_selection: bool,
+    pub selected_is_dir: bool,
+    pub selected_count: usize,
+    pub is_empty_dir: bool,
+    pub is_terminal_focused: bool,
+    pub has_git: bool,
+    pub has_project: bool,
+    pub has_clipboard: bool,
+}
+
+impl ContextFilter {
+    /// Returns true if `action` is particularly applicable to the current context.
+    pub fn is_action_relevant(&self, action: Action) -> bool {
+        if self.is_terminal_focused {
+            return matches!(
+                action,
+                Action::FocusFileManager
+                    | Action::ToggleTerminalFocus
+                    | Action::SyncDirectoryToTerminal
+                    | Action::SyncTerminalToDirectory
+                    | Action::ScrollTerminalUp
+                    | Action::ScrollTerminalDown
+                    | Action::Help
+                    | Action::Quit
+                    | Action::CommandPalette
+            );
+        }
+
+        match action {
+            // Actions relevant when a file is selected
+            Action::Open
+            | Action::Copy
+            | Action::Cut
+            | Action::Rename
+            | Action::Delete
+            | Action::GetInfo => self.has_selection,
+            Action::Preview => self.has_selection && !self.selected_is_dir,
+            // Actions relevant when something is selected or multiple selected
+            Action::DeselectAll => self.selected_count > 0,
+            Action::ToggleSelect | Action::SelectRangeUp | Action::SelectRangeDown => {
+                !self.is_empty_dir
+            }
+            Action::SelectAll | Action::InvertSelection => !self.is_empty_dir,
+            // Paste relevant when clipboard has items
+            Action::Paste => self.has_clipboard,
+            // Actions relevant when in git
+            Action::GitStatus | Action::GitStatusPanel | Action::GoGitRoot => self.has_git,
+            // Actions relevant when in project
+            Action::ProjectCockpit
+            | Action::GoProjectRoot
+            | Action::OpenManifest
+            | Action::OpenReadme
+            | Action::OpenLicense
+            | Action::GoSourceDir => self.has_project,
+            // Always relevant file manager actions
+            Action::NewFile
+            | Action::NewDirectory
+            | Action::StartSearch
+            | Action::RefreshDirectory
+            | Action::ToggleHidden
+            | Action::ChangeSort
+            | Action::FileRadar
+            | Action::ToggleFocusMode
+            | Action::Help
+            | Action::SmartJump
+            | Action::JumpToPath
+            | Action::GoHomeDir
+            | Action::GoRootDir
+            | Action::NewTab
+            | Action::CloseTab
+            | Action::NextTab
+            | Action::PreviousTab
+            | Action::FocusTerminal
+            | Action::ToggleTerminalFocus
+            | Action::CommandPalette
+            | Action::Quit => true,
+            _ => false,
+        }
+    }
+}
+
+/// Filters all registered commands based on `query` for `Platform::current()`.
+pub fn filter_commands(query: &str) -> Vec<Command> {
+    filter_commands_with_platform(query, Platform::current())
+}
+
+/// Filters commands for a specific [`Platform`] using fuzzy matching.
+pub fn filter_commands_with_platform(query: &str, platform: Platform) -> Vec<Command> {
     let trimmed = query.trim();
+
     if trimmed.is_empty() {
-        return Command::ALL.iter().collect();
+        return Command::all().to_vec();
     }
 
-    let query_lower = trimmed.to_lowercase();
-    Command::ALL
-        .iter()
-        .filter(|cmd| {
-            cmd.name.to_lowercase().contains(&query_lower)
-                || cmd.description.to_lowercase().contains(&query_lower)
-                || cmd
-                    .category
-                    .display_name()
-                    .to_lowercase()
-                    .contains(&query_lower)
-                || cmd
-                    .shortcut
-                    .map(|s| s.to_lowercase().contains(&query_lower))
-                    .unwrap_or(false)
-        })
-        .collect()
+    let mut scored: Vec<(Command, i32)> = Vec::new();
+
+    for cmd in Command::all() {
+        let name = cmd.name();
+        let desc = cmd.description();
+        let cat = cmd.category().display_name();
+
+        let shortcut_cur = cmd.shortcut_for_platform(platform).unwrap_or_default();
+        let shortcut_mac = cmd.shortcut_for_platform(Platform::Mac).unwrap_or_default();
+        let shortcut_win = cmd
+            .shortcut_for_platform(Platform::Windows)
+            .unwrap_or_default();
+
+        let mut extra_targets: Vec<&str> = Vec::new();
+        if cmd.action() == Action::Help {
+            extra_targets.push("shortcuts");
+            extra_targets.push("show shortcuts");
+            extra_targets.push("show all shortcuts");
+            extra_targets.push("keyboard shortcuts");
+        } else if cmd.action() == Action::CommandPalette {
+            extra_targets.push("cmd");
+            extra_targets.push("command center");
+            extra_targets.push("command palette");
+        } else if cmd.action() == Action::SmartJump {
+            extra_targets.push("quick switcher");
+            extra_targets.push("jump");
+        }
+
+        let mut best = fuzzy_match(trimmed, name).map(|s| s + 400);
+        if let Some(desc_score) = fuzzy_match(trimmed, desc) {
+            best = Some(best.map_or(desc_score, |s| s.max(desc_score)));
+        }
+        if let Some(cat_score) = fuzzy_match(trimmed, cat) {
+            best = Some(best.map_or(cat_score, |s| s.max(cat_score)));
+        }
+        for sc in [&shortcut_cur, &shortcut_mac, &shortcut_win] {
+            if let Some(sc_score) = fuzzy_match(trimmed, sc) {
+                best = Some(best.map_or(sc_score, |s| s.max(sc_score)));
+            }
+        }
+        if let Some(extra_score) = fuzzy_match_multi(trimmed, &extra_targets) {
+            let boosted = extra_score + 400;
+            best = Some(best.map_or(boosted, |s| s.max(boosted)));
+        }
+
+        if let Some(score) = best {
+            scored.push((*cmd, score));
+        }
+    }
+
+    // Sort by descending score
+    scored.sort_by_key(|a| std::cmp::Reverse(a.1));
+    scored.into_iter().map(|(cmd, _)| cmd).collect()
 }
 
-/// Application state for the command palette.
+/// Advanced search across actions and file entries for the Command Center.
+pub fn search_command_center(
+    query: &str,
+    context: ContextFilter,
+    files: &[PathBuf],
+    platform: Platform,
+) -> Vec<CommandCenterEntry> {
+    let trimmed = query.trim();
+
+    if trimmed.is_empty() {
+        // Default clean view: show context-relevant actions first, then general commands
+        let mut relevant = Vec::new();
+        let mut other = Vec::new();
+
+        for cmd in Command::all() {
+            if context.is_action_relevant(cmd.action()) {
+                relevant.push(CommandCenterEntry::from_action(cmd.action()));
+            } else {
+                other.push(CommandCenterEntry::from_action(cmd.action()));
+            }
+        }
+
+        relevant.extend(other);
+        return relevant;
+    }
+
+    let mut scored: Vec<(CommandCenterEntry, i32)> = Vec::new();
+
+    // 1. Match Actions
+    for cmd in Command::all() {
+        let name = cmd.name();
+        let desc = cmd.description();
+        let cat = cmd.category().display_name();
+
+        let shortcut_cur = cmd.shortcut_for_platform(platform).unwrap_or_default();
+        let shortcut_mac = cmd.shortcut_for_platform(Platform::Mac).unwrap_or_default();
+        let shortcut_win = cmd
+            .shortcut_for_platform(Platform::Windows)
+            .unwrap_or_default();
+
+        let mut extra_targets: Vec<&str> = Vec::new();
+        if cmd.action() == Action::Help {
+            extra_targets.push("shortcuts");
+            extra_targets.push("show shortcuts");
+            extra_targets.push("show all shortcuts");
+            extra_targets.push("keyboard shortcuts");
+        } else if cmd.action() == Action::CommandPalette {
+            extra_targets.push("cmd");
+            extra_targets.push("command center");
+            extra_targets.push("command palette");
+        } else if cmd.action() == Action::SmartJump {
+            extra_targets.push("quick switcher");
+            extra_targets.push("jump");
+        }
+
+        let mut best = fuzzy_match(trimmed, name).map(|s| s + 400);
+        if let Some(desc_score) = fuzzy_match(trimmed, desc) {
+            best = Some(best.map_or(desc_score, |s| s.max(desc_score)));
+        }
+        if let Some(cat_score) = fuzzy_match(trimmed, cat) {
+            best = Some(best.map_or(cat_score, |s| s.max(cat_score)));
+        }
+        for sc in [&shortcut_cur, &shortcut_mac, &shortcut_win] {
+            if let Some(sc_score) = fuzzy_match(trimmed, sc) {
+                best = Some(best.map_or(sc_score, |s| s.max(sc_score)));
+            }
+        }
+        if let Some(extra_score) = fuzzy_match_multi(trimmed, &extra_targets) {
+            let boosted = extra_score + 400;
+            best = Some(best.map_or(boosted, |s| s.max(boosted)));
+        }
+
+        if let Some(mut score) = best {
+            // Boost context-relevant actions
+            if context.is_action_relevant(cmd.action()) {
+                score += 150;
+            }
+            scored.push((CommandCenterEntry::from_action(cmd.action()), score));
+        }
+    }
+
+    // 2. Match accessible files/folders (if query is at least 2 chars)
+    if trimmed.len() >= 2 {
+        for file in files {
+            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let path_str = file.to_string_lossy();
+
+            if let Some(score) =
+                fuzzy_match(trimmed, name).or_else(|| fuzzy_match(trimmed, &path_str))
+            {
+                let is_dir = file.is_dir();
+                scored.push((
+                    CommandCenterEntry::FileTarget {
+                        title: name.to_string(),
+                        path: file.clone(),
+                        is_dir,
+                    },
+                    score,
+                ));
+            }
+        }
+    }
+
+    scored.sort_by_key(|a| std::cmp::Reverse(a.1));
+    scored.into_iter().map(|(entry, _)| entry).collect()
+}
+
+/// Application state for the Command Center.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandPaletteState {
     query: String,
     selected: usize,
+    context: ContextFilter,
+    accessible_files: Vec<PathBuf>,
 }
 
 impl CommandPaletteState {
     /// Creates a new empty command palette state.
     pub fn new() -> Self {
-        Self {
-            query: String::new(),
-            selected: 0,
-        }
+        Self::default()
     }
 
     /// The current search query.
@@ -561,18 +524,52 @@ impl CommandPaletteState {
         self.selected
     }
 
+    /// Sets the context filter for intelligent action prioritization.
+    pub fn set_context(&mut self, context: ContextFilter) {
+        self.context = context;
+        self.clamp_selection();
+    }
+
+    /// Sets the list of accessible files for search matching.
+    pub fn set_accessible_files(&mut self, files: Vec<PathBuf>) {
+        self.accessible_files = files;
+        self.clamp_selection();
+    }
+
+    /// The list of filtered entries (actions and files) matching the current query.
+    pub fn entries(&self) -> Vec<CommandCenterEntry> {
+        search_command_center(
+            &self.query,
+            self.context,
+            &self.accessible_files,
+            Platform::current(),
+        )
+    }
+
     /// The list of commands matching the current query.
-    pub fn filtered_commands(&self) -> Vec<&'static Command> {
+    pub fn filtered_commands(&self) -> Vec<Command> {
         filter_commands(&self.query)
     }
 
     /// The command currently selected in the filtered results, if any.
-    pub fn selected_command(&self) -> Option<&'static Command> {
-        let results = self.filtered_commands();
-        if results.is_empty() {
-            None
+    pub fn selected_command(&self) -> Option<Command> {
+        let entries = self.entries();
+        if let Some(CommandCenterEntry::Action(cmd)) = entries.get(self.selected) {
+            Some(*cmd)
         } else {
+            // Fallback to filtered commands
+            let results = self.filtered_commands();
             results.get(self.selected).copied()
+        }
+    }
+
+    /// The navigation target path if the selected item is a file/directory.
+    pub fn selected_navigation_target(&self) -> Option<PathBuf> {
+        let entries = self.entries();
+        if let Some(CommandCenterEntry::FileTarget { path, .. }) = entries.get(self.selected) {
+            Some(path.clone())
+        } else {
+            None
         }
     }
 
@@ -601,10 +598,31 @@ impl CommandPaletteState {
 
     /// Moves the selection down one entry.
     pub fn move_down(&mut self) {
-        let count = self.filtered_commands().len();
+        let count = self.entries().len();
         if count > 0 {
             self.selected = (self.selected + 1).min(count - 1);
         }
+    }
+
+    /// Sets the selected index explicitly (e.g. from mouse click).
+    pub fn set_selected(&mut self, index: usize) {
+        self.selected = index;
+        self.clamp_selection();
+    }
+
+    /// Sets the selected index (alias for set_selected).
+    pub fn select(&mut self, index: usize) {
+        self.set_selected(index);
+    }
+
+    /// Moves selection up one entry (alias for move_up).
+    pub fn select_previous(&mut self) {
+        self.move_up();
+    }
+
+    /// Moves selection down one entry (alias for move_down).
+    pub fn select_next(&mut self) {
+        self.move_down();
     }
 
     /// Resets the query to empty and selection to 0.
@@ -615,7 +633,7 @@ impl CommandPaletteState {
 
     /// Ensures the selection index is valid for the current filtered results.
     fn clamp_selection(&mut self) {
-        let count = self.filtered_commands().len();
+        let count = self.entries().len();
         if count == 0 {
             self.selected = 0;
         } else if self.selected >= count {
@@ -630,52 +648,14 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn command_registry_contains_all_required_commands() {
-        let actions: Vec<Action> = Command::ALL.iter().map(|c| c.action()).collect();
+    fn command_registry_contains_all_actions() {
+        let commands = Command::all();
+        let actions: HashSet<Action> = commands.iter().map(|c| c.action()).collect();
 
-        let required = [
-            Action::Open,
-            Action::GoParent,
-            Action::NewFile,
-            Action::NewDirectory,
-            Action::Rename,
-            Action::Copy,
-            Action::Cut,
-            Action::Paste,
-            Action::Delete,
-            Action::Preview,
-            Action::StartSearch,
-            Action::ChangeSort,
-            Action::ToggleHidden,
-            Action::SwitchPane,
-            Action::Help,
-            Action::Quit,
-            Action::AddBookmark,
-            Action::OpenBookmarks,
-            Action::RemoveBookmark,
-            Action::SmartJump,
-            Action::JumpToPath,
-            Action::DuplicateTab,
-            Action::GoGitRoot,
-            Action::GoProjectRoot,
-        ];
-
-        for req in required {
+        for action in Action::ALL {
             assert!(
-                actions.contains(&req),
-                "Command registry missing action: {req:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn command_registry_has_no_duplicate_actions() {
-        let mut unique = HashSet::new();
-        for cmd in Command::ALL {
-            assert!(
-                unique.insert(cmd.action()),
-                "Duplicate action found in registry: {:?}",
-                cmd.action()
+                actions.contains(&action),
+                "Command list missing action: {action:?}"
             );
         }
     }
@@ -683,10 +663,10 @@ mod tests {
     #[test]
     fn command_filtering_empty_query_returns_all() {
         let all = filter_commands("");
-        assert_eq!(all.len(), Command::ALL.len());
+        assert_eq!(all.len(), Action::ALL.len());
 
         let whitespace = filter_commands("   ");
-        assert_eq!(whitespace.len(), Command::ALL.len());
+        assert_eq!(whitespace.len(), Action::ALL.len());
     }
 
     #[test]
@@ -695,10 +675,28 @@ mod tests {
         let lower = filter_commands("rename");
         let mixed = filter_commands("ReNaMe");
 
-        assert_eq!(upper.len(), 1);
         assert_eq!(upper[0].action(), Action::Rename);
-        assert_eq!(upper, lower);
-        assert_eq!(lower, mixed);
+        assert_eq!(upper[0], lower[0]);
+        assert_eq!(lower[0], mixed[0]);
+    }
+
+    #[test]
+    fn command_filtering_fuzzy_matches() {
+        // "ren" -> Rename
+        let ren = filter_commands("ren");
+        assert_eq!(ren[0].action(), Action::Rename);
+
+        // "ref" -> Refresh Directory
+        let ref_cmd = filter_commands("ref");
+        assert_eq!(ref_cmd[0].action(), Action::RefreshDirectory);
+
+        // "shcut" -> Help & Shortcuts
+        let shcut = filter_commands("shcut");
+        assert_eq!(shcut[0].action(), Action::Help);
+
+        // "cmd" -> Command Center
+        let cmd = filter_commands("cmd");
+        assert_eq!(cmd[0].action(), Action::CommandPalette);
     }
 
     #[test]
@@ -718,11 +716,10 @@ mod tests {
     fn command_palette_state_navigation() {
         let mut palette = CommandPaletteState::new();
         assert_eq!(palette.selected_index(), 0);
-        assert_eq!(palette.selected_command(), Some(&Command::ALL[0]));
+        assert!(palette.selected_command().is_some());
 
         palette.move_down();
         assert_eq!(palette.selected_index(), 1);
-        assert_eq!(palette.selected_command(), Some(&Command::ALL[1]));
 
         palette.move_up();
         assert_eq!(palette.selected_index(), 0);
@@ -730,10 +727,26 @@ mod tests {
         palette.move_up();
         assert_eq!(palette.selected_index(), 0);
 
-        let total = Command::ALL.len();
+        let total = palette.entries().len();
         for _ in 0..total + 5 {
             palette.move_down();
         }
         assert_eq!(palette.selected_index(), total - 1);
+    }
+
+    #[test]
+    fn test_command_center_search_with_files() {
+        let files = vec![
+            PathBuf::from("/test/src/main.rs"),
+            PathBuf::from("/test/Cargo.toml"),
+        ];
+        let entries =
+            search_command_center("main", ContextFilter::default(), &files, Platform::Mac);
+        assert!(!entries.is_empty());
+        let has_file = entries.iter().any(|e| match e {
+            CommandCenterEntry::FileTarget { title, .. } => title == "main.rs",
+            _ => false,
+        });
+        assert!(has_file, "Search for 'main' should find main.rs");
     }
 }

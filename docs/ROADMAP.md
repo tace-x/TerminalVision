@@ -19,7 +19,13 @@
   - [x] 16.1 Release Profile & Release Builds
   - [x] 16.2 Documentation & User Guidance
   - [x] 16.3 Final Release Verification & Sign-off
-- [ ] 17. Signature Design System & UI Makeover
-  - [x] 17.1 TerminalVision Signature Design System
-  - [x] 17.2 Super-Responsive Layout Engine
-  - [ ] 17.3 File Panes, File Rows, and Modal Refinement
+- [x] 17. Signature Update
+  - [x] 17.1 Universal Action & Cross-Platform Shortcut Registry
+  - [x] 17.2 Unified Terminal ↔ File Manager State Synchronization
+  - [x] 17.3 Smart Selection, Multi-Selection & Context Menu
+  - [x] 17.4 Command Center & Quick Switcher
+  - [x] 17.5 File Intelligence, Universal Quick Preview & Smart Operations
+  - [x] 17.6 Interactive Breadcrumb, Favorites & Storage Vision
+  - [x] 17.7 Signature UI & Minimal Motion
+  - [x] 17.8 Dynamic Theme Engine & Terminal Palette Synchronization
+  - [x] 17.9 Final Integration, QA, Stability & Release Polish

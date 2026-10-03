@@ -1,8 +1,10 @@
 //! Image format inspection and metadata decoding.
 //!
 //! Provides pure, fast, safe decoding of image headers for PNG, JPEG, GIF, BMP,
-//! and WEBP formats without heavy external libraries or memory overhead.
+//! WEBP, and TIFF formats without heavy external libraries or memory overhead.
+//! Includes terminal graphics protocol detection for Kitty, iTerm2, and Sixel.
 
+use std::env;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -15,6 +17,7 @@ pub enum ImageFormat {
     Gif,
     Bmp,
     Webp,
+    Tiff,
 }
 
 impl ImageFormat {
@@ -26,6 +29,7 @@ impl ImageFormat {
             Self::Gif => "GIF (Graphics Interchange Format)",
             Self::Bmp => "BMP (Windows Bitmap)",
             Self::Webp => "WEBP (Web Picture Format)",
+            Self::Tiff => "TIFF (Tagged Image File Format)",
         }
     }
 
@@ -37,6 +41,85 @@ impl ImageFormat {
             Self::Gif => "GIF",
             Self::Bmp => "BMP",
             Self::Webp => "WEBP",
+            Self::Tiff => "TIFF",
+        }
+    }
+}
+
+/// Supported terminal inline graphics rendering protocols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalGraphicsProtocol {
+    /// Kitty graphics protocol.
+    Kitty,
+    /// iTerm2 inline image protocol (also supported by WezTerm, Ghostty, Mintty, VSCode).
+    Iterm2,
+    /// Sixel bitmap graphics protocol.
+    Sixel,
+    /// No terminal graphics protocol detected (fallback to structured metadata).
+    None,
+}
+
+impl TerminalGraphicsProtocol {
+    /// Detects whether the active terminal environment supports an inline graphics protocol.
+    pub fn detect() -> Self {
+        if let Ok(val) = env::var("TERMINALVISION_GRAPHICS") {
+            let lower = val.to_ascii_lowercase();
+            if lower == "kitty" {
+                return Self::Kitty;
+            } else if lower == "iterm2" || lower == "iterm" {
+                return Self::Iterm2;
+            } else if lower == "sixel" {
+                return Self::Sixel;
+            } else if lower == "none" || lower == "off" {
+                return Self::None;
+            }
+        }
+
+        // Kitty protocol detection
+        if env::var("KITTY_WINDOW_ID").is_ok()
+            || env::var("KITTY_PID").is_ok()
+            || env::var("TERM")
+                .map(|t| t.contains("kitty"))
+                .unwrap_or(false)
+        {
+            return Self::Kitty;
+        }
+
+        // iTerm2 protocol detection
+        if let Ok(prog) = env::var("TERM_PROGRAM") {
+            let p_lower = prog.to_ascii_lowercase();
+            if p_lower.contains("iterm")
+                || p_lower.contains("wezterm")
+                || p_lower.contains("ghostty")
+                || p_lower.contains("mintty")
+                || p_lower.contains("vscode")
+            {
+                return Self::Iterm2;
+            }
+        }
+
+        // Sixel protocol detection
+        if let Ok(term) = env::var("TERM") {
+            let t_lower = term.to_ascii_lowercase();
+            if t_lower.contains("sixel")
+                || t_lower.contains("mlterm")
+                || t_lower.contains("foot")
+                || t_lower.contains("yaft")
+            {
+                return Self::Sixel;
+            }
+        }
+
+        Self::None
+    }
+
+    /// User-friendly label of the protocol.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Kitty => "Kitty Graphics Protocol",
+            Self::Iterm2 => "iTerm2 Inline Images",
+            Self::Sixel => "Sixel Graphics",
+            Self::None => "None (Metadata Fallback)",
         }
     }
 }
@@ -49,6 +132,7 @@ pub struct ImagePreview {
     pub height: u32,
     pub color_info: String,
     pub file_size: u64,
+    pub graphics_protocol: TerminalGraphicsProtocol,
 }
 
 impl ImagePreview {
@@ -56,6 +140,7 @@ impl ImagePreview {
     pub fn from_path(path: &Path) -> Result<Self, String> {
         let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
         let file_size = meta.len();
+        let graphics_protocol = TerminalGraphicsProtocol::detect();
 
         let mut file = File::open(path).map_err(|e| e.to_string())?;
         let mut header = [0u8; 64];
@@ -86,6 +171,7 @@ impl ImagePreview {
                 height,
                 color_info: color_str,
                 file_size,
+                graphics_protocol,
             });
         }
 
@@ -104,6 +190,7 @@ impl ImagePreview {
                 height,
                 color_info: format!("GIF{ver} Indexed Color (Palette)"),
                 file_size,
+                graphics_protocol,
             });
         }
 
@@ -124,6 +211,7 @@ impl ImagePreview {
                 height,
                 color_info: format!("{bpp}-bit Bitmap RGB"),
                 file_size,
+                graphics_protocol,
             });
         }
 
@@ -139,6 +227,7 @@ impl ImagePreview {
                     height,
                     color_info: "VP8 Lossy 24-bit RGB".into(),
                     file_size,
+                    graphics_protocol,
                 });
             } else if n >= 25 && &header[12..16] == b"VP8L" {
                 // Lossless VP8L
@@ -154,6 +243,7 @@ impl ImagePreview {
                     height,
                     color_info: "VP8L Lossless RGBA".into(),
                     file_size,
+                    graphics_protocol,
                 });
             } else if n >= 30 && &header[12..16] == b"VP8X" {
                 // Extended VP8X
@@ -171,11 +261,27 @@ impl ImagePreview {
                     height,
                     color_info: "VP8X Extended Canvas".into(),
                     file_size,
+                    graphics_protocol,
                 });
             }
         }
 
-        // 5. JPEG check: \xFF\xD8
+        // 5. TIFF check: II*\0 or MM\0*
+        if (header.starts_with(&[0x49, 0x49, 0x2A, 0x00])
+            || header.starts_with(&[0x4D, 0x4D, 0x00, 0x2A]))
+            && let Ok((width, height, color_str)) = parse_tiff_header(&mut file, &header[0..4])
+        {
+            return Ok(Self {
+                format: ImageFormat::Tiff,
+                width,
+                height,
+                color_info: color_str,
+                file_size,
+                graphics_protocol,
+            });
+        }
+
+        // 6. JPEG check: \xFF\xD8
         if header.starts_with(&[0xFF, 0xD8])
             && let Ok((width, height, channels)) = parse_jpeg_dimensions(&mut file)
         {
@@ -191,6 +297,7 @@ impl ImagePreview {
                 height: height as u32,
                 color_info: color_str.into(),
                 file_size,
+                graphics_protocol,
             });
         }
 
@@ -208,6 +315,7 @@ impl ImagePreview {
                 height: 0,
                 color_info: "PNG Image".into(),
                 file_size,
+                graphics_protocol,
             }),
             "jpg" | "jpeg" => Ok(Self {
                 format: ImageFormat::Jpeg,
@@ -215,6 +323,7 @@ impl ImagePreview {
                 height: 0,
                 color_info: "JPEG Image".into(),
                 file_size,
+                graphics_protocol,
             }),
             "gif" => Ok(Self {
                 format: ImageFormat::Gif,
@@ -222,6 +331,7 @@ impl ImagePreview {
                 height: 0,
                 color_info: "GIF Image".into(),
                 file_size,
+                graphics_protocol,
             }),
             "bmp" => Ok(Self {
                 format: ImageFormat::Bmp,
@@ -229,6 +339,7 @@ impl ImagePreview {
                 height: 0,
                 color_info: "Bitmap Image".into(),
                 file_size,
+                graphics_protocol,
             }),
             "webp" => Ok(Self {
                 format: ImageFormat::Webp,
@@ -236,6 +347,15 @@ impl ImagePreview {
                 height: 0,
                 color_info: "WebP Image".into(),
                 file_size,
+                graphics_protocol,
+            }),
+            "tiff" | "tif" => Ok(Self {
+                format: ImageFormat::Tiff,
+                width: 0,
+                height: 0,
+                color_info: "TIFF Image".into(),
+                file_size,
+                graphics_protocol,
             }),
             _ => Err("Unsupported or unrecognized image format".into()),
         }
@@ -273,6 +393,68 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
         a = t;
     }
     a.max(1)
+}
+
+/// Parses TIFF IFD headers to find width and height.
+fn parse_tiff_header(file: &mut File, magic: &[u8]) -> io::Result<(u32, u32, String)> {
+    let is_le = magic[0] == 0x49;
+    file.seek(SeekFrom::Start(4))?;
+    let mut offset_bytes = [0u8; 4];
+    file.read_exact(&mut offset_bytes)?;
+    let ifd_offset = if is_le {
+        u32::from_le_bytes(offset_bytes)
+    } else {
+        u32::from_be_bytes(offset_bytes)
+    };
+
+    file.seek(SeekFrom::Start(ifd_offset as u64))?;
+    let mut count_bytes = [0u8; 2];
+    file.read_exact(&mut count_bytes)?;
+    let num_tags = if is_le {
+        u16::from_le_bytes(count_bytes)
+    } else {
+        u16::from_be_bytes(count_bytes)
+    };
+
+    let mut width = 0u32;
+    let mut height = 0u32;
+
+    for _ in 0..num_tags.min(64) {
+        let mut entry = [0u8; 12];
+        if file.read_exact(&mut entry).is_err() {
+            break;
+        }
+        let tag = if is_le {
+            u16::from_le_bytes([entry[0], entry[1]])
+        } else {
+            u16::from_be_bytes([entry[0], entry[1]])
+        };
+        let tag_type = if is_le {
+            u16::from_le_bytes([entry[2], entry[3]])
+        } else {
+            u16::from_be_bytes([entry[2], entry[3]])
+        };
+        let val = if tag_type == 3 {
+            // SHORT
+            if is_le {
+                u16::from_le_bytes([entry[8], entry[9]]) as u32
+            } else {
+                u16::from_be_bytes([entry[8], entry[9]]) as u32
+            }
+        } else if is_le {
+            u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]])
+        } else {
+            u32::from_be_bytes([entry[8], entry[9], entry[10], entry[11]])
+        };
+
+        if tag == 0x0100 {
+            width = val;
+        } else if tag == 0x0101 {
+            height = val;
+        }
+    }
+
+    Ok((width, height, "TIFF Raster Image".to_string()))
 }
 
 /// Parses JPEG frame header markers to find SOF0/SOF2 width and height.
@@ -342,5 +524,17 @@ mod tests {
     fn test_gcd() {
         assert_eq!(gcd(1920, 1080), 120);
         assert_eq!(gcd(100, 100), 100);
+    }
+
+    #[test]
+    fn test_graphics_protocol_detection() {
+        let proto = TerminalGraphicsProtocol::detect();
+        assert!(matches!(
+            proto,
+            TerminalGraphicsProtocol::Kitty
+                | TerminalGraphicsProtocol::Iterm2
+                | TerminalGraphicsProtocol::Sixel
+                | TerminalGraphicsProtocol::None
+        ));
     }
 }

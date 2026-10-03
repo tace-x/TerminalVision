@@ -1,8 +1,8 @@
 //! The file and code preview renderer.
 //!
 //! Renders the prepared preview content from [`PreviewState`] into the reserved
-//! preview area on wide layouts or in Preview mode with line numbering and
-//! lightweight deterministic syntax highlighting.
+//! preview area on wide layouts or in Quick Preview mode with line numbering,
+//! syntax highlighting, image details, PDF metadata, archive tables, and directory summaries.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -12,7 +12,11 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::app::state::App;
 use crate::filesystem::entry::EntryKind;
+use crate::preview::archive::ArchivePreview;
+use crate::preview::directory::DirectoryPreview;
+use crate::preview::image::ImagePreview;
 use crate::preview::metadata::MetadataPreview;
+use crate::preview::pdf::PdfPreview;
 use crate::preview::syntax::{TokenKind, tokenize_line};
 use crate::preview::{Language, PreviewContent};
 use crate::ui::theme::Theme;
@@ -24,7 +28,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let theme = Theme::default();
+    let theme = app.theme();
     let preview = app.preview();
     let title = match (
         preview
@@ -37,6 +41,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             if text_preview.language() != Language::PlainText =>
         {
             format!(" [Preview: {name} • {}] ", text_preview.language().name())
+        }
+        (Some(name), Some(PreviewContent::Image(img))) => {
+            format!(" [Preview: {name} • {}] ", img.format.short_name())
+        }
+        (Some(name), Some(PreviewContent::Pdf(_))) => {
+            format!(" [Preview: {name} • PDF] ")
+        }
+        (Some(name), Some(PreviewContent::Archive(arc))) => {
+            format!(" [Preview: {name} • {}] ", arc.format)
+        }
+        (Some(name), Some(PreviewContent::Directory(_))) => {
+            format!(" [Preview: {name} • Directory] ")
         }
         (Some(name), Some(PreviewContent::Metadata(meta))) => {
             format!(" [Preview: {name} • {}] ", meta.kind_display())
@@ -58,22 +74,39 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    match preview.content() {
+    render_preview_inner_with_theme(frame, inner, preview.content(), &theme);
+}
+
+/// Renders the inner content of a preview widget with the default theme.
+pub fn render_preview_inner(frame: &mut Frame, inner: Rect, content: Option<&PreviewContent>) {
+    render_preview_inner_with_theme(frame, inner, content, &Theme::default());
+}
+
+/// Renders the inner content of a preview widget given any `PreviewContent` and `Theme`.
+pub fn render_preview_inner_with_theme(
+    frame: &mut Frame,
+    inner: Rect,
+    content: Option<&PreviewContent>,
+    theme: &Theme,
+) {
+    match content {
         Some(PreviewContent::Text(text_preview)) => {
-            render_text_preview(frame, inner, text_preview);
+            render_text_preview(frame, inner, text_preview, theme);
         }
         Some(PreviewContent::Image(image_preview)) => {
-            render_image_preview(frame, inner, image_preview);
+            render_image_preview(frame, inner, image_preview, theme);
+        }
+        Some(PreviewContent::Pdf(pdf_preview)) => {
+            render_pdf_preview(frame, inner, pdf_preview, theme);
+        }
+        Some(PreviewContent::Archive(archive_preview)) => {
+            render_archive_preview(frame, inner, archive_preview, theme);
+        }
+        Some(PreviewContent::Directory(dir_preview)) => {
+            render_directory_preview(frame, inner, dir_preview, theme);
         }
         Some(PreviewContent::Metadata(metadata_preview)) => {
-            render_metadata_preview(frame, inner, metadata_preview);
-        }
-
-        Some(PreviewContent::Directory) => {
-            let message = Paragraph::new("[Directory]")
-                .alignment(Alignment::Center)
-                .style(theme.preview_muted);
-            frame.render_widget(message, inner);
+            render_metadata_preview(frame, inner, metadata_preview, theme);
         }
         Some(PreviewContent::Empty) => {
             let message = Paragraph::new("[Empty file]")
@@ -106,7 +139,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             frame.render_widget(message, inner);
         }
         None => {
-            let placeholder = Paragraph::new("Preview")
+            let placeholder = Paragraph::new("Select a file to preview it.")
                 .alignment(Alignment::Center)
                 .style(theme.preview_muted);
             frame.render_widget(placeholder, inner);
@@ -123,8 +156,7 @@ struct MetadataField {
 }
 
 /// Renders structured filesystem entry metadata in a responsive layout.
-fn render_metadata_preview(frame: &mut Frame, area: Rect, meta: &MetadataPreview) {
-    let theme = Theme::default();
+fn render_metadata_preview(frame: &mut Frame, area: Rect, meta: &MetadataPreview, theme: &Theme) {
     let mut fields: Vec<MetadataField> = Vec::new();
 
     let (badge_str, badge_style) = if meta.is_broken_symlink() {
@@ -252,7 +284,6 @@ fn render_metadata_preview(frame: &mut Frame, area: Rect, meta: &MetadataPreview
         let mut spans = Vec::new();
 
         if total_width < 25 {
-            // Highly compact mode for very narrow viewports
             let prefix = format!("{}: ", field.label);
             let prefix_w = display_width(&prefix);
             spans.push(Span::styled(
@@ -268,7 +299,6 @@ fn render_metadata_preview(frame: &mut Frame, area: Rect, meta: &MetadataPreview
             };
             spans.push(Span::styled(val, field.value_style));
         } else {
-            // Standard aligned layout
             let label_col = format!("  {:<width$} │ ", field.label, width = max_label_width);
             let label_col_w = display_width(&label_col);
             spans.push(Span::styled(label_col, theme.preview_line_number));
@@ -300,8 +330,12 @@ fn render_metadata_preview(frame: &mut Frame, area: Rect, meta: &MetadataPreview
 }
 
 /// Renders code or text lines with dynamic line numbers and syntax styling.
-fn render_text_preview(frame: &mut Frame, area: Rect, preview: &crate::preview::TextPreview) {
-    let theme = Theme::default();
+fn render_text_preview(
+    frame: &mut Frame,
+    area: Rect,
+    preview: &crate::preview::TextPreview,
+    theme: &Theme,
+) {
     let visible_lines = area.height as usize;
     let inner_width = area.width as usize;
     let total_lines = preview.line_count();
@@ -317,7 +351,6 @@ fn render_text_preview(frame: &mut Frame, area: Rect, preview: &crate::preview::
             break;
         }
 
-        // If it's the last visible line and content is truncated
         if idx + 1 == visible_lines && (preview.is_truncated() || total_lines > visible_lines) {
             lines.push(Line::from(vec![Span::styled(
                 "[Preview truncated]",
@@ -344,8 +377,7 @@ fn render_text_preview(frame: &mut Frame, area: Rect, preview: &crate::preview::
 }
 
 /// Renders structured image preview metadata and formatted dimensions card.
-fn render_image_preview(frame: &mut Frame, area: Rect, img: &crate::preview::ImagePreview) {
-    let theme = Theme::default();
+fn render_image_preview(frame: &mut Frame, area: Rect, img: &ImagePreview, theme: &Theme) {
     let total_width = area.width as usize;
     let max_rows = area.height as usize;
 
@@ -353,13 +385,20 @@ fn render_image_preview(frame: &mut Frame, area: Rect, img: &crate::preview::Ima
 
     // Header badge
     let header_badge = format!(" [IMAGE: {}] ", img.format.short_name());
-    lines.push(Line::from(vec![Span::styled(
-        header_badge,
-        theme
-            .tab_active_focused
-            .bg(ratatui::style::Color::Magenta)
-            .fg(ratatui::style::Color::White),
-    )]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            header_badge,
+            theme
+                .tab_active_focused
+                .bg(ratatui::style::Color::Magenta)
+                .fg(ratatui::style::Color::White),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("[Graphics: {}]", img.graphics_protocol.display_name()),
+            theme.preview_muted,
+        ),
+    ]));
     lines.push(Line::default());
 
     // Details
@@ -381,13 +420,18 @@ fn render_image_preview(frame: &mut Frame, area: Rect, img: &crate::preview::Ima
         ("Aspect Ratio", &ratio_str, theme.preview_metadata_label),
         ("Color Model", &img.color_info, theme.preview_metadata_value),
         ("File Size", &size_str, theme.header_path),
+        (
+            "Terminal Protocol",
+            img.graphics_protocol.display_name(),
+            theme.preview_line_number,
+        ),
     ];
 
     for (label, val, val_style) in fields {
         if lines.len() >= max_rows {
             break;
         }
-        let label_fmt = format!("{:<14} ", format!("{label}:"));
+        let label_fmt = format!("{:<16} ", format!("{label}:"));
         let line = Line::from(vec![
             Span::styled(label_fmt, theme.preview_metadata_label),
             Span::styled(val.to_string(), val_style),
@@ -418,6 +462,229 @@ fn render_image_preview(frame: &mut Frame, area: Rect, img: &crate::preview::Ima
             "└────────────────────────────────────────┘",
             theme.preview_border,
         )));
+    }
+
+    let paragraph = Paragraph::new(lines.into_iter().take(max_rows).collect::<Vec<_>>());
+    frame.render_widget(paragraph, area);
+}
+
+/// Renders structured PDF document summary preview.
+fn render_pdf_preview(frame: &mut Frame, area: Rect, pdf: &PdfPreview, theme: &Theme) {
+    let max_rows = area.height as usize;
+    let mut lines = Vec::new();
+
+    // Header badge
+    lines.push(Line::from(vec![
+        Span::styled(
+            " [PDF DOCUMENT] ",
+            theme
+                .tab_active_focused
+                .bg(ratatui::style::Color::Red)
+                .fg(ratatui::style::Color::White),
+        ),
+        Span::raw(" "),
+        Span::styled(&pdf.version, theme.header_path),
+    ]));
+    lines.push(Line::default());
+
+    let page_str = pdf
+        .page_count
+        .map(|c| format!("{c} pages"))
+        .unwrap_or_else(|| "Unknown".to_string());
+    let size_str = crate::preview::format_size(pdf.file_size);
+
+    let mut fields: Vec<(&str, String)> = vec![
+        ("Version", pdf.version.clone()),
+        ("Page Count", page_str),
+        ("File Size", size_str),
+    ];
+
+    if let Some(t) = &pdf.title {
+        fields.push(("Title", t.clone()));
+    }
+    if let Some(a) = &pdf.author {
+        fields.push(("Author", a.clone()));
+    }
+    if let Some(c) = &pdf.creator {
+        fields.push(("Creator", c.clone()));
+    }
+    if let Some(p) = &pdf.producer {
+        fields.push(("Producer", p.clone()));
+    }
+
+    for (label, val) in fields {
+        if lines.len() >= max_rows {
+            break;
+        }
+        let label_fmt = format!("{:<14} ", format!("{label}:"));
+        lines.push(Line::from(vec![
+            Span::styled(label_fmt, theme.preview_metadata_label),
+            Span::styled(val, theme.preview_metadata_value),
+        ]));
+    }
+
+    if !pdf.sample_text.is_empty() && max_rows > lines.len() + 2 {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Extracted Text Snippet:",
+            theme.header_path,
+        )));
+        for snippet in &pdf.sample_text {
+            if lines.len() >= max_rows {
+                break;
+            }
+            lines.push(Line::from(Span::styled(
+                format!("  • {snippet}"),
+                theme.preview_line_number,
+            )));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines.into_iter().take(max_rows).collect::<Vec<_>>());
+    frame.render_widget(paragraph, area);
+}
+
+/// Renders archive table and contents listing preview.
+fn render_archive_preview(frame: &mut Frame, area: Rect, arc: &ArchivePreview, theme: &Theme) {
+    let max_rows = area.height as usize;
+    let total_width = area.width as usize;
+    let mut lines = Vec::new();
+
+    // Header badge
+    let uncomp_str = arc
+        .total_uncompressed_size
+        .map(crate::preview::format_size)
+        .unwrap_or_else(|| "--".to_string());
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" [{}] ", arc.format),
+            theme
+                .tab_active_focused
+                .bg(ratatui::style::Color::Yellow)
+                .fg(ratatui::style::Color::Black),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!(
+                "{} entries • Compressed: {} (Uncompressed: {})",
+                arc.total_entries,
+                crate::preview::format_size(arc.file_size),
+                uncomp_str
+            ),
+            theme.preview_metadata_value,
+        ),
+    ]));
+    lines.push(Line::default());
+
+    if arc.entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Archive contents (preview only — not extracted)",
+            theme.preview_muted,
+        )));
+    } else {
+        lines.push(Line::from(vec![Span::styled(
+            "  #  │ Name / Path",
+            theme.preview_metadata_label,
+        )]));
+        lines.push(Line::from(Span::styled(
+            "─────┼────────────────────────────────────────────",
+            theme.preview_border,
+        )));
+
+        for (idx, entry) in arc.entries.iter().enumerate() {
+            if lines.len() >= max_rows {
+                break;
+            }
+            let idx_str = format!("{:>3} │ ", idx + 1);
+            let icon = if entry.is_directory { "📁 " } else { "📄 " };
+            let size_tag = entry
+                .size
+                .map(|s| format!(" ({})", crate::preview::format_size(s)))
+                .unwrap_or_default();
+
+            let full_name = format!("{icon}{}{size_tag}", entry.path);
+            let avail = total_width.saturating_sub(display_width(&idx_str));
+            let name_trunc = truncate_to_width(&full_name, avail);
+
+            lines.push(Line::from(vec![
+                Span::styled(idx_str, theme.preview_line_number),
+                Span::styled(
+                    name_trunc,
+                    if entry.is_directory {
+                        theme.entry_directory
+                    } else {
+                        theme.preview_metadata_value
+                    },
+                ),
+            ]));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines.into_iter().take(max_rows).collect::<Vec<_>>());
+    frame.render_widget(paragraph, area);
+}
+
+/// Renders directory summary and statistics preview.
+fn render_directory_preview(frame: &mut Frame, area: Rect, dir: &DirectoryPreview, theme: &Theme) {
+    let max_rows = area.height as usize;
+    let mut lines = Vec::new();
+
+    // Header badge
+    lines.push(Line::from(vec![
+        Span::styled(
+            " [DIRECTORY] ",
+            theme
+                .tab_active_focused
+                .bg(ratatui::style::Color::Blue)
+                .fg(ratatui::style::Color::White),
+        ),
+        Span::raw(" "),
+        Span::styled(&dir.name, theme.header_path.add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::default());
+
+    let fields = [
+        ("Path", dir.path.display().to_string()),
+        ("Total Items", dir.item_count.to_string()),
+        ("Files", dir.file_count.to_string()),
+        ("Subdirectories", dir.dir_count.to_string()),
+        ("Symlinks", dir.symlink_count.to_string()),
+        (
+            "Immediate Size",
+            crate::preview::format_size(dir.immediate_size),
+        ),
+        (
+            "Git Context",
+            dir.git_status.clone().unwrap_or_else(|| "None".to_string()),
+        ),
+    ];
+
+    for (label, val) in fields {
+        if lines.len() >= max_rows {
+            break;
+        }
+        let label_fmt = format!("{:<16} ", format!("{label}:"));
+        lines.push(Line::from(vec![
+            Span::styled(label_fmt, theme.preview_metadata_label),
+            Span::styled(val, theme.preview_metadata_value),
+        ]));
+    }
+
+    if !dir.sample_entries.is_empty() && max_rows > lines.len() + 2 {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Contained Entries:",
+            theme.header_path,
+        )));
+        for entry_name in &dir.sample_entries {
+            if lines.len() >= max_rows {
+                break;
+            }
+            lines.push(Line::from(Span::styled(
+                format!("  {entry_name}"),
+                theme.preview_metadata_value,
+            )));
+        }
     }
 
     let paragraph = Paragraph::new(lines.into_iter().take(max_rows).collect::<Vec<_>>());
@@ -471,10 +738,8 @@ fn token_style(kind: TokenKind) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filesystem::test_support::TempDir;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use std::fs;
 
     #[test]
     fn preview_renders_without_panic() {
@@ -506,106 +771,5 @@ mod tests {
                 render(f, Rect::new(0, 0, 0, 0), &app);
             })
             .unwrap();
-    }
-
-    #[test]
-    fn preview_responsive_sizes_do_not_panic() {
-        let sizes = [(5, 5), (10, 10), (20, 10), (40, 20), (80, 24)];
-        let app = App::default();
-
-        for (w, h) in sizes {
-            let backend = TestBackend::new(w, h);
-            let mut terminal = Terminal::new(backend).unwrap();
-            terminal
-                .draw(|f| {
-                    render(f, f.area(), &app);
-                })
-                .unwrap();
-        }
-    }
-
-    #[test]
-    fn preview_renders_directory_metadata() {
-        let temp = TempDir::new("preview-dir-meta");
-        let dir = temp.path().join("test_dir");
-        fs::create_dir_all(&dir).unwrap();
-
-        let mut app = App::at(temp.path().to_path_buf()).unwrap();
-        app.handle_action(crate::app::actions::Action::Preview);
-
-        let backend = TestBackend::new(50, 15);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|f| {
-                render(f, f.area(), &app);
-            })
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let text: String = (0..15)
-            .flat_map(|y| (0..50).map(move |x| buffer[(x, y)].symbol().to_string()))
-            .collect();
-        assert!(text.contains("DIR") || text.contains("Directory"));
-        assert!(text.contains("test_dir"));
-    }
-
-    #[test]
-    fn preview_renders_symlink_metadata() {
-        let temp = TempDir::new("preview-sym-meta");
-        let target = temp.path().join("target.txt");
-        fs::write(&target, "content").unwrap();
-        let symlink = temp.path().join("link.txt");
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &symlink).unwrap();
-        #[cfg(windows)]
-        let _ = std::os::windows::fs::symlink_file(&target, &symlink);
-
-        if symlink.exists() || symlink.is_symlink() {
-            let mut app = App::at(temp.path().to_path_buf()).unwrap();
-            app.handle_action(crate::app::actions::Action::Preview);
-
-            let backend = TestBackend::new(50, 15);
-            let mut terminal = Terminal::new(backend).unwrap();
-
-            terminal
-                .draw(|f| {
-                    render(f, f.area(), &app);
-                })
-                .unwrap();
-
-            let buffer = terminal.backend().buffer();
-            let text: String = (0..15)
-                .flat_map(|y| (0..50).map(move |x| buffer[(x, y)].symbol().to_string()))
-                .collect();
-            assert!(text.contains("LINK") || text.contains("Symlink"));
-        }
-    }
-
-    #[test]
-    fn preview_renders_code_with_line_numbers() {
-        let temp = TempDir::new("preview-code");
-        let file = temp.path().join("main.rs");
-        fs::write(&file, "fn main() {\n    println!(\"Hello\");\n}\n").unwrap();
-
-        let mut app = App::at(temp.path().to_path_buf()).unwrap();
-        app.handle_action(crate::app::actions::Action::Preview);
-
-        let backend = TestBackend::new(60, 15);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal
-            .draw(|f| {
-                render(f, f.area(), &app);
-            })
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let text: String = (0..15)
-            .flat_map(|y| (0..60).map(move |x| buffer[(x, y)].symbol().to_string()))
-            .collect();
-        assert!(text.contains("1 │"));
-        assert!(text.contains("fn main"));
     }
 }

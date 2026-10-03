@@ -32,6 +32,17 @@ fn name_to_display(name: &OsStr, max_width: usize) -> String {
 /// `is_active` controls whether the selected row uses the active (brighter)
 /// or inactive (dimmer) highlight style.
 pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool) {
+    render_with_theme(frame, area, pane, is_active, &Theme::default());
+}
+
+/// Renders the file list inside `area` with the specified `Theme`.
+pub fn render_with_theme(
+    frame: &mut Frame,
+    area: Rect,
+    pane: &Pane,
+    is_active: bool,
+    theme: &Theme,
+) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -40,25 +51,25 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool) {
 
     // Empty state.
     if total == 0 {
-        render_empty(frame, area, pane);
+        render_empty(frame, area, pane, theme);
         return;
     }
 
     // Walk-results mode: the pane is showing paths from a recursive search.
     if !pane.visible_results().is_empty() {
-        render_results(frame, area, pane, is_active);
+        render_results(frame, area, pane, is_active, theme);
         return;
     }
 
     // Listing mode: the pane is showing its directory entries.
-    render_listing(frame, area, pane, is_active);
+    render_listing(frame, area, pane, is_active, theme);
 
     // Scroll indicators.
-    render_scroll_indicators(frame, area, pane);
+    render_scroll_indicators(frame, area, pane, theme);
 }
 
 /// Renders the listing-mode file list.
-fn render_listing(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool) {
+fn render_listing(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool, theme: &Theme) {
     let height = area.height as usize;
     let width = area.width as usize;
     let scroll = pane.scroll_offset();
@@ -80,6 +91,7 @@ fn render_listing(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool) {
             is_cursor,
             is_multi_selected,
             is_active,
+            theme,
         );
         lines.push(line);
     }
@@ -89,7 +101,7 @@ fn render_listing(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool) {
 }
 
 /// Renders the walk-results mode file list.
-fn render_results(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool) {
+fn render_results(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool, theme: &Theme) {
     let height = area.height as usize;
     let width = area.width as usize;
     let scroll = pane.scroll_offset();
@@ -111,6 +123,7 @@ fn render_results(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool) {
             is_cursor,
             is_multi_selected,
             is_active,
+            theme,
         );
         lines.push(line);
     }
@@ -120,6 +133,7 @@ fn render_results(frame: &mut Frame, area: Rect, pane: &Pane, is_active: bool) {
 }
 
 /// Builds one row [`Line`] for a directory-listing entry.
+#[allow(clippy::too_many_arguments)]
 fn entry_line(
     kind: EntryKind,
     name: &OsStr,
@@ -128,8 +142,8 @@ fn entry_line(
     is_cursor: bool,
     is_multi_selected: bool,
     is_active: bool,
+    theme: &Theme,
 ) -> Line<'static> {
-    let theme = Theme::default();
     let name_str = name.to_string_lossy();
     let (icon_symbol, icon_style) = theme.file_icon_and_style(&name_str, kind);
     let icon_width = display_width(icon_symbol);
@@ -195,8 +209,8 @@ fn result_line(
     is_cursor: bool,
     is_multi_selected: bool,
     is_active: bool,
+    theme: &Theme,
 ) -> Line<'static> {
-    let theme = Theme::default();
     let (marker, marker_style) = theme.row_marker(is_cursor, is_multi_selected, is_active);
     let marker_width = display_width(marker);
 
@@ -226,41 +240,57 @@ fn row_style(is_selected: bool, is_active: bool) -> Style {
 }
 
 /// Renders the empty-state message centred in `area`.
-fn render_empty(frame: &mut Frame, area: Rect, pane: &Pane) {
-    let theme = Theme::default();
-    let message = if pane.search().is_active() {
-        "No matches found"
+fn render_empty(frame: &mut Frame, area: Rect, pane: &Pane, theme: &Theme) {
+    let width = area.width as usize;
+    let height = area.height as usize;
+    if height == 0 || width == 0 {
+        return;
+    }
+
+    let is_search = pane.search().is_active();
+    let primary_msg = if is_search {
+        "No matches found."
     } else {
-        "Empty directory"
+        "Nothing here yet."
     };
 
-    let width = area.width as usize;
-    let text = truncate_to_width(message, width);
+    let secondary_msg = if is_search {
+        "Try a different query or press Esc."
+    } else {
+        "[N] New File • [D] New Folder • [⌘K] Commands"
+    };
 
-    // Centre vertically: place the message at the middle row.
-    let vertical_offset = area.height / 2;
+    let mut lines = Vec::new();
+
+    // Primary line
+    let primary_trunc = truncate_to_width(primary_msg, width);
+    let prim_w = display_width(&primary_trunc);
+    let prim_pad = (width.saturating_sub(prim_w)) / 2;
+    lines.push(Line::from(vec![
+        Span::raw(" ".repeat(prim_pad)),
+        Span::styled(primary_trunc, theme.empty_state_text),
+    ]));
+
+    // Secondary hint line if height permits
+    if height >= 4 && width >= 25 {
+        let sec_trunc = truncate_to_width(secondary_msg, width);
+        let sec_w = display_width(&sec_trunc);
+        let sec_pad = (width.saturating_sub(sec_w)) / 2;
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(sec_pad)),
+            Span::styled(sec_trunc, theme.footer_hint),
+        ]));
+    }
+
+    let vertical_offset = (area.height.saturating_sub(lines.len() as u16)) / 2;
     let message_area = Rect {
         x: area.x,
         y: area.y.saturating_add(vertical_offset),
         width: area.width,
-        height: 1.min(area.height.saturating_sub(vertical_offset)),
+        height: (lines.len() as u16).min(area.height.saturating_sub(vertical_offset)),
     };
 
-    if message_area.height == 0 {
-        return;
-    }
-
-    // Centre horizontally with padding.
-    let text_width = display_width(&text);
-    let padding = (width.saturating_sub(text_width)) / 2;
-    let pad_str = " ".repeat(padding);
-
-    let line = Line::from(vec![
-        Span::raw(pad_str),
-        Span::styled(text, theme.empty_state_text),
-    ]);
-
-    let paragraph = Paragraph::new(vec![line]);
+    let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, message_area);
 }
 
@@ -270,8 +300,7 @@ fn render_empty(frame: &mut Frame, area: Rect, pane: &Pane) {
 /// An `↑` appears at the right edge of the first row when entries are
 /// scrolled past above, and a `↓` at the right edge of the last row when
 /// entries remain below.
-fn render_scroll_indicators(frame: &mut Frame, area: Rect, pane: &Pane) {
-    let theme = Theme::default();
+fn render_scroll_indicators(frame: &mut Frame, area: Rect, pane: &Pane, theme: &Theme) {
     let height = area.height as usize;
     let total = pane.visible_count();
     let scroll = pane.scroll_offset();
@@ -334,8 +363,8 @@ mod tests {
             .flat_map(|y| (0..40).map(move |x| buffer[(x, y)].symbol().to_string()))
             .collect();
         assert!(
-            all_text.contains("Empty directory"),
-            "empty pane must show 'Empty directory'"
+            all_text.contains("Nothing here yet"),
+            "empty pane must show 'Nothing here yet'"
         );
     }
 
@@ -357,6 +386,7 @@ mod tests {
 
     #[test]
     fn entry_line_selected_has_marker() {
+        let theme = Theme::default();
         let line = entry_line(
             EntryKind::File,
             OsStr::new("test.txt"),
@@ -365,13 +395,15 @@ mod tests {
             true,
             false,
             true,
+            &theme,
         );
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(text.starts_with("> "), "selected row must start with '> '");
+        assert!(text.starts_with("▸ "), "selected row must start with '▸ '");
     }
 
     #[test]
     fn entry_line_multi_selected_has_marker() {
+        let theme = Theme::default();
         let line = entry_line(
             EntryKind::File,
             OsStr::new("test.txt"),
@@ -380,6 +412,7 @@ mod tests {
             false,
             true,
             true,
+            &theme,
         );
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(
@@ -390,6 +423,7 @@ mod tests {
 
     #[test]
     fn entry_line_unselected_has_no_marker() {
+        let theme = Theme::default();
         let line = entry_line(
             EntryKind::File,
             OsStr::new("test.txt"),
@@ -398,6 +432,7 @@ mod tests {
             false,
             false,
             true,
+            &theme,
         );
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(
@@ -408,6 +443,7 @@ mod tests {
 
     #[test]
     fn entry_line_truncates_long_names() {
+        let theme = Theme::default();
         let long_name = "a".repeat(200) + ".rs";
         let line = entry_line(
             EntryKind::File,
@@ -417,6 +453,7 @@ mod tests {
             false,
             false,
             true,
+            &theme,
         );
         let _text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         let total_width: usize = line.spans.iter().map(|s| display_width(&s.content)).sum();
@@ -429,6 +466,7 @@ mod tests {
 
     #[test]
     fn entry_line_handles_unicode_names() {
+        let theme = Theme::default();
         let line = entry_line(
             EntryKind::File,
             OsStr::new("മലയാളം_ഫയൽ.txt"),
@@ -437,6 +475,7 @@ mod tests {
             false,
             false,
             true,
+            &theme,
         );
         let total_width: usize = line.spans.iter().map(|s| display_width(&s.content)).sum();
         assert!(
@@ -448,6 +487,7 @@ mod tests {
 
     #[test]
     fn entry_line_renders_git_status_marker_when_space_permits() {
+        let theme = Theme::default();
         let line = entry_line(
             EntryKind::File,
             OsStr::new("modified.txt"),
@@ -456,6 +496,7 @@ mod tests {
             false,
             false,
             true,
+            &theme,
         );
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(
@@ -537,18 +578,20 @@ mod tests {
 
     #[test]
     fn result_line_selected_has_marker() {
-        let line = result_line("path/to/file.txt", 40, true, false, true);
+        let theme = Theme::default();
+        let line = result_line("path/to/file.txt", 40, true, false, true, &theme);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(
-            text.starts_with("> "),
-            "selected result row must start with '> '"
+            text.starts_with("▸ "),
+            "selected result row must start with '▸ '"
         );
     }
 
     #[test]
     fn result_line_truncates_long_paths() {
+        let theme = Theme::default();
         let long_path = "a/".repeat(100) + "file.txt";
-        let line = result_line(&long_path, 20, false, false, true);
+        let line = result_line(&long_path, 20, false, false, true, &theme);
         let total_width: usize = line.spans.iter().map(|s| display_width(&s.content)).sum();
         assert!(
             total_width <= 20,
@@ -559,10 +602,11 @@ mod tests {
 
     #[test]
     fn test_phase17_3_responsive_file_row_tiers() {
+        let theme = Theme::default();
         let name = OsStr::new("important_document.pdf");
 
         // Extreme width (15 cols)
-        let line_extreme = entry_line(EntryKind::File, name, None, 15, true, false, true);
+        let line_extreme = entry_line(EntryKind::File, name, None, 15, true, false, true, &theme);
         let width_extreme: usize = line_extreme
             .spans
             .iter()
@@ -579,6 +623,7 @@ mod tests {
             false,
             true,
             true,
+            &theme,
         );
         let width_narrow: usize = line_narrow
             .spans
@@ -596,6 +641,7 @@ mod tests {
             true,
             false,
             true,
+            &theme,
         );
         let width_med: usize = line_med
             .spans
@@ -613,6 +659,7 @@ mod tests {
             false,
             false,
             false,
+            &theme,
         );
         let width_wide: usize = line_wide
             .spans
@@ -624,6 +671,7 @@ mod tests {
 
     #[test]
     fn test_phase17_3_symlink_rendering_distinction() {
+        let theme = Theme::default();
         let symlink_line = entry_line(
             EntryKind::Symlink,
             OsStr::new("symlink_target"),
@@ -632,6 +680,7 @@ mod tests {
             false,
             false,
             true,
+            &theme,
         );
         let text: String = symlink_line
             .spans
@@ -643,6 +692,7 @@ mod tests {
 
     #[test]
     fn test_phase17_3_git_status_all_variants_render() {
+        let theme = Theme::default();
         let statuses = [
             (FileStatus::Modified, "M"),
             (FileStatus::Added, "A"),
@@ -660,6 +710,7 @@ mod tests {
                 false,
                 false,
                 true,
+                &theme,
             );
             let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
             assert!(

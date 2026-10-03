@@ -5,12 +5,11 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::state::App;
-use crate::ui::theme::Theme;
 use crate::ui::truncate_path_to_width;
 
 /// Renders the integrated terminal panel inside `area`.
@@ -19,7 +18,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, is_focused: bool) {
         return;
     }
 
-    let theme = Theme::default();
+    let theme = app.theme();
     let (border_type, border_style) = theme.terminal_border(is_focused);
 
     let shell_name = app.terminal_shell_name();
@@ -29,7 +28,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, is_focused: bool) {
 
     let title = if is_focused {
         Line::from(vec![
-            Span::styled(" ⚡ TERMINAL ", theme.terminal_title_focused),
+            Span::styled(
+                format!(" {} SHELL (PTY) ", theme.symbols.focus_bullet),
+                theme.terminal_title_focused,
+            ),
             Span::styled(
                 format!("│ {shell_name} │ {path_display} "),
                 theme.terminal_meta_focused,
@@ -38,7 +40,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, is_focused: bool) {
         ])
     } else {
         Line::from(vec![
-            Span::styled(" TERMINAL ", theme.terminal_title_unfocused),
+            Span::styled(
+                format!(" {} SHELL (PTY) ", theme.symbols.unfocused_bullet),
+                theme.terminal_title_unfocused,
+            ),
             Span::styled(
                 format!("│ {shell_name} │ {path_display} "),
                 theme.terminal_meta_unfocused,
@@ -72,6 +77,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, is_focused: bool) {
         for (c_idx, cell) in row.into_iter().take(inner_width).enumerate() {
             let mut style = cell.style;
 
+            // Map ANSI cell colors through active theme palette
+            if let Some(fg) = style.fg {
+                style = style.fg(theme.map_terminal_color(fg));
+            }
+            if let Some(bg) = style.bg {
+                style = style.bg(theme.map_terminal_color(bg));
+            }
+
             // Render focused cursor
             if is_focused
                 && cursor_visible
@@ -80,8 +93,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, is_focused: bool) {
             {
                 style = style
                     .add_modifier(Modifier::REVERSED)
-                    .bg(Color::Cyan)
-                    .fg(Color::Black);
+                    .bg(theme.palette.cursor)
+                    .fg(theme.palette.background);
             }
 
             spans.push(Span::styled(cell.ch.to_string(), style));

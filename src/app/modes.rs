@@ -34,8 +34,65 @@ pub enum Mode {
     FileRadar,
     /// Revealing hierarchical path context (file -> parent -> project -> git repo).
     RevealContext,
+    /// Viewing the popup context menu for the active selection or directory.
+    ContextMenu,
+    /// Viewing the interactive Storage Vision directory analysis and heatmap.
+    StorageVision,
+    /// Selecting and live-previewing color themes.
+    ThemeSelector,
     /// Interacting with the integrated embedded terminal shell.
     Terminal,
+}
+
+impl Mode {
+    /// Maps the current application mode to its corresponding [`crate::app::actions::ActionContext`].
+    pub const fn action_context(self) -> crate::app::actions::ActionContext {
+        match self {
+            Self::Normal => crate::app::actions::ActionContext::FileManager,
+            Self::Terminal => crate::app::actions::ActionContext::Terminal,
+            Self::Search => crate::app::actions::ActionContext::Search,
+            Self::Preview => crate::app::actions::ActionContext::Preview,
+            Self::Help => crate::app::actions::ActionContext::Help,
+            Self::CommandPalette | Self::SmartJump => {
+                crate::app::actions::ActionContext::CommandPalette
+            }
+            Self::Rename
+            | Self::Create
+            | Self::Confirm
+            | Self::Bookmarks
+            | Self::Jump
+            | Self::ProjectCockpit
+            | Self::GitStatusPanel
+            | Self::FileRadar
+            | Self::RevealContext
+            | Self::ContextMenu
+            | Self::StorageVision
+            | Self::ThemeSelector => crate::app::actions::ActionContext::Dialog,
+        }
+    }
+
+    /// Whether this mode represents an overlay or modal dialog.
+    pub const fn is_modal(self) -> bool {
+        match self {
+            Self::Normal | Self::Search | Self::Terminal => false,
+            Self::Rename
+            | Self::Create
+            | Self::Confirm
+            | Self::Preview
+            | Self::CommandPalette
+            | Self::Help
+            | Self::Bookmarks
+            | Self::Jump
+            | Self::SmartJump
+            | Self::ProjectCockpit
+            | Self::GitStatusPanel
+            | Self::FileRadar
+            | Self::RevealContext
+            | Self::ContextMenu
+            | Self::StorageVision
+            | Self::ThemeSelector => true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -65,6 +122,8 @@ mod tests {
             Mode::GitStatusPanel,
             Mode::FileRadar,
             Mode::RevealContext,
+            Mode::ContextMenu,
+            Mode::StorageVision,
             Mode::Terminal,
         ];
 

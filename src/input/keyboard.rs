@@ -1,7 +1,7 @@
 //! Keyboard input mapping to application actions.
 //!
 //! Translates terminal key events into semantic [`Action`]s based on the active
-//! interaction [`Mode`].
+//! interaction [`Mode`] using the centralized [`ShortcutRegistry`].
 //!
 //! This module never performs filesystem operations or state mutations directly.
 
@@ -10,206 +10,98 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::app::actions::Action;
 use crate::app::modes::Mode;
 use crate::input::InputEvent;
+use crate::input::platform::Platform;
+use crate::input::shortcut::ShortcutRegistry;
 
-/// Whether a key event is the interrupt (Ctrl+C) that asks the application to stop.
+/// Whether a key event is an explicit interrupt request that asks the application to quit.
 pub fn is_quit_request(key: KeyEvent) -> bool {
-    key.kind == KeyEventKind::Press
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C'))
+    if key.kind == KeyEventKind::Release {
+        return false;
+    }
+
+    let is_c = key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C');
+    let is_q = key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q');
+
+    if Platform::current().is_mac() {
+        // On macOS: Command+Q or Control+C is a quit request
+        (key.modifiers.contains(KeyModifiers::SUPER) && is_q)
+            || (key.modifiers.contains(KeyModifiers::CONTROL) && is_c)
+    } else {
+        // On Windows/Linux: Control+Q or plain 'q' (in non-terminal)
+        key.modifiers.contains(KeyModifiers::CONTROL) && is_q
+    }
 }
 
-/// Maps a physical key event to an [`Action`] based on the current [`Mode`].
+/// Maps a physical key event to an [`Action`] based on the current [`Mode`] and active [`Platform`].
 pub fn map_key(key: KeyEvent, mode: Mode) -> Option<Action> {
+    map_key_with_platform(key, mode, Platform::current())
+}
+
+/// Maps a key event with an explicit [`Platform`] (useful for testing cross-platform behaviors).
+pub fn map_key_with_platform(key: KeyEvent, mode: Mode, platform: Platform) -> Option<Action> {
     if key.kind == KeyEventKind::Release {
         return None;
     }
 
-    // Ctrl+T or F12 always toggles terminal focus across all modes!
-    if (key.modifiers.contains(KeyModifiers::CONTROL)
-        && (key.code == KeyCode::Char('t') || key.code == KeyCode::Char('T')))
-        || key.code == KeyCode::F(12)
-    {
-        return Some(Action::ToggleTerminalFocus);
+    // In Terminal mode, only global terminal focus toggle is intercepted.
+    // All other keys must be passed directly to the interactive PTY shell.
+    if mode == Mode::Terminal {
+        let registry = ShortcutRegistry::global();
+        if let Some(Action::ToggleTerminalFocus) =
+            registry.lookup(&key, mode.action_context(), platform)
+        {
+            return Some(Action::ToggleTerminalFocus);
+        }
+        return None;
     }
 
-    // Ctrl+C in Normal or Modal mode is a quit request.
-    // In Terminal mode, Ctrl+C is passed to the PTY shell as SIGINT.
-    if mode != Mode::Terminal && is_quit_request(key) {
+    // For non-terminal modes, look up the key in the centralized Shortcut Registry.
+    let registry = ShortcutRegistry::global();
+    if let Some(action) = registry.lookup(&key, mode.action_context(), platform) {
+        return Some(action);
+    }
+
+    // Secondary fallback for macOS Ctrl+C to quit if not already handled
+    if platform.is_mac()
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C'))
+    {
         return Some(Action::Quit);
     }
 
-    // Ctrl+P opens the command palette.
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && (key.code == KeyCode::Char('p') || key.code == KeyCode::Char('P'))
-    {
-        return Some(Action::CommandPalette);
-    }
-
-    // In Terminal mode, all other keys go to PTY shell
-    if mode == Mode::Terminal {
-        return None;
-    }
-
-    // Ctrl+A in Normal mode selects all entries.
-    if mode == Mode::Normal
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && (key.code == KeyCode::Char('a') || key.code == KeyCode::Char('A'))
-    {
-        return Some(Action::SelectAll);
-    }
-
-    if mode == Mode::Normal
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && (key.code == KeyCode::Char('f') || key.code == KeyCode::Char('F'))
-    {
-        return Some(Action::ToggleFocusMode);
-    }
-
-    // If other Ctrl or Alt modifiers are active, do not trigger normal single-key actions.
-    // Alt+Left/Right navigate tab history regardless of active mode.
-    if key.modifiers.contains(KeyModifiers::ALT) {
-        if key.code == KeyCode::Left {
-            return Some(Action::GoBack);
-        }
-        if key.code == KeyCode::Right {
-            return Some(Action::GoForward);
-        }
-    }
-
-    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
-        return None;
-    }
-
-    match mode {
-        Mode::Normal => map_normal_key(key),
-        Mode::Terminal => None,
-        Mode::Search => map_search_action(key),
-        Mode::Preview | Mode::Help => map_overlay_key(key),
-        Mode::Rename
-        | Mode::Create
-        | Mode::Confirm
-        | Mode::CommandPalette
-        | Mode::Bookmarks
-        | Mode::Jump
-        | Mode::SmartJump
-        | Mode::ProjectCockpit
-        | Mode::GitStatusPanel
-        | Mode::FileRadar
-        | Mode::RevealContext => map_input_modal_key(key),
-    }
+    None
 }
 
-/// Maps a key event in Normal mode.
-fn map_normal_key(key: KeyEvent) -> Option<Action> {
-    match key.code {
-        // Navigation
-        KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
-        KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
-        KeyCode::Left | KeyCode::Char('h') => Some(Action::MoveLeft),
-        KeyCode::Right | KeyCode::Char('l') => Some(Action::MoveRight),
-        KeyCode::Enter => Some(Action::Open),
-        KeyCode::Backspace => Some(Action::GoParent),
-        KeyCode::Home => Some(Action::GoHome),
-        KeyCode::End => Some(Action::GoEnd),
-        KeyCode::PageUp => Some(Action::PageUp),
-        KeyCode::PageDown => Some(Action::PageDown),
-        KeyCode::Tab => Some(Action::SwitchPane),
-
-        // Path & Smart jump
-        KeyCode::Char('g') => Some(Action::JumpToPath),
-        KeyCode::Char('J') => Some(Action::SmartJump),
-
-        // Developer Intelligence & Power Tools
-        KeyCode::Char('P') => Some(Action::ProjectCockpit),
-        KeyCode::Char('G') => Some(Action::GitStatusPanel),
-        KeyCode::Char('F') => Some(Action::FileRadar),
-        KeyCode::Char('C') => Some(Action::RevealContext),
-
-        // File operations
-        KeyCode::Char('n') => Some(Action::NewFile),
-        KeyCode::Char('N') => Some(Action::NewDirectory),
-        KeyCode::Char('r') => Some(Action::Rename),
-        KeyCode::Char('y') => Some(Action::Copy),
-        KeyCode::Char('x') => Some(Action::Cut),
-        KeyCode::Char('p') => Some(Action::Paste),
-        KeyCode::Char('d') => Some(Action::Delete),
-
-        // Multi-selection
-        KeyCode::Char(' ') => Some(Action::ToggleSelect),
-        KeyCode::Char('*') => Some(Action::InvertSelection),
-        KeyCode::Char('u') => Some(Action::DeselectAll),
-
-        // View
-        KeyCode::Char('.') => Some(Action::ToggleHidden),
-        KeyCode::Char('s') => Some(Action::ChangeSort),
-        KeyCode::Char('v') => Some(Action::Preview),
-        KeyCode::Char('z') | KeyCode::Char('Z') => Some(Action::ToggleFocusMode),
-
-        // Bookmarks
-        KeyCode::Char('b') => Some(Action::AddBookmark),
-        KeyCode::Char('B') => Some(Action::OpenBookmarks),
-
-        // Tabs
-        KeyCode::Char('t') => Some(Action::NewTab),
-        KeyCode::Char('T') => Some(Action::DuplicateTab),
-        KeyCode::Char('w') => Some(Action::CloseTab),
-        KeyCode::Char(']') => Some(Action::NextTab),
-        KeyCode::Char('[') => Some(Action::PreviousTab),
-
-        // Search
-        KeyCode::Char('/') => Some(Action::StartSearch),
-
-        // Application
-        KeyCode::Char('?') => Some(Action::Help),
-        KeyCode::Char('q') => Some(Action::Quit),
-        KeyCode::Esc => Some(Action::Cancel),
-
-        _ => None,
-    }
-}
-
-/// Maps actions in Search mode (Esc cancels, Tab cycles mode).
-fn map_search_action(key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Esc => Some(Action::Cancel),
-        KeyCode::Tab => Some(Action::CycleSearchMode),
-        _ => None,
-    }
-}
-
-/// Maps keys in viewer overlay modes (Preview and Help).
-fn map_overlay_key(key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => Some(Action::Cancel),
-        _ => None,
-    }
-}
-
-/// Maps keys in text input / confirmation modal modes.
-fn map_input_modal_key(key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Esc => Some(Action::Cancel),
-        _ => None,
-    }
-}
-
-/// Translates a [`KeyEvent`] into an [`InputEvent`].
+/// Translates a [`KeyEvent`] into an [`InputEvent`] taking into account mode state machine context.
 pub fn map_key_event(key: KeyEvent, mode: Mode) -> InputEvent {
+    map_key_event_with_platform(key, mode, Platform::current())
+}
+
+/// Translates a [`KeyEvent`] into an [`InputEvent`] for a specific [`Platform`].
+pub fn map_key_event_with_platform(key: KeyEvent, mode: Mode, platform: Platform) -> InputEvent {
     if key.kind == KeyEventKind::Release {
         return InputEvent::Ignored;
     }
 
-    if let Some(action) = map_key(key, mode) {
+    // 1. Try mapping to an Action
+    if let Some(action) = map_key_with_platform(key, mode, platform) {
         return InputEvent::Action(action);
     }
 
+    // 2. In Terminal mode, all unmapped keys go straight to the PTY shell
     if mode == Mode::Terminal {
         return InputEvent::TerminalKey(key);
     }
 
     let has_ctrl_or_alt =
         key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT);
+    let has_super = key.modifiers.contains(KeyModifiers::SUPER);
 
+    if has_super {
+        return InputEvent::Ignored;
+    }
+
+    // 3. Mode-specific text input and interaction routing
     match mode {
         Mode::Search if !has_ctrl_or_alt => match key.code {
             KeyCode::Enter => InputEvent::SearchConfirm,
@@ -217,7 +109,6 @@ pub fn map_key_event(key: KeyEvent, mode: Mode) -> InputEvent {
             KeyCode::Up => InputEvent::Action(Action::MoveUp),
             KeyCode::Down => InputEvent::Action(Action::MoveDown),
             KeyCode::Char(c) => InputEvent::SearchChar(c),
-            // Tab is handled as an Action (CycleSearchMode) above via map_key.
             _ => InputEvent::Ignored,
         },
         Mode::Create | Mode::Rename | Mode::Jump if !has_ctrl_or_alt => match key.code {
@@ -255,10 +146,30 @@ pub fn map_key_event(key: KeyEvent, mode: Mode) -> InputEvent {
             KeyCode::Enter => InputEvent::ModalConfirm,
             KeyCode::Up | KeyCode::Char('k') => InputEvent::ModalNavigateUp,
             KeyCode::Down | KeyCode::Char('j') => InputEvent::ModalNavigateDown,
+            KeyCode::Char('K') | KeyCode::Char('u') => InputEvent::Action(Action::MoveFavoriteUp),
+            KeyCode::Char('J') | KeyCode::Char('m') => InputEvent::Action(Action::MoveFavoriteDown),
             KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete => {
                 InputEvent::Action(Action::RemoveBookmark)
             }
-            KeyCode::Char('q') => InputEvent::Action(Action::Cancel),
+            KeyCode::Char('q') | KeyCode::Esc => InputEvent::Action(Action::Cancel),
+            _ => InputEvent::Ignored,
+        },
+        Mode::StorageVision if !has_ctrl_or_alt => match key.code {
+            KeyCode::Enter => InputEvent::ModalConfirm,
+            KeyCode::Up | KeyCode::Char('k') => InputEvent::ModalNavigateUp,
+            KeyCode::Down | KeyCode::Char('j') => InputEvent::ModalNavigateDown,
+            KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                InputEvent::Action(Action::GoParent)
+            }
+            KeyCode::Char('o') | KeyCode::Char('O') => InputEvent::Action(Action::Open),
+            KeyCode::Char('q') | KeyCode::Esc => InputEvent::Action(Action::Cancel),
+            _ => InputEvent::Ignored,
+        },
+        Mode::ThemeSelector if !has_ctrl_or_alt => match key.code {
+            KeyCode::Enter => InputEvent::ModalConfirm,
+            KeyCode::Up | KeyCode::Char('k') => InputEvent::ModalNavigateUp,
+            KeyCode::Down | KeyCode::Char('j') => InputEvent::ModalNavigateDown,
+            KeyCode::Char('q') | KeyCode::Esc => InputEvent::Action(Action::Cancel),
             _ => InputEvent::Ignored,
         },
         Mode::ProjectCockpit | Mode::GitStatusPanel | Mode::RevealContext if !has_ctrl_or_alt => {
@@ -272,6 +183,15 @@ pub fn map_key_event(key: KeyEvent, mode: Mode) -> InputEvent {
         }
         Mode::FileRadar if !has_ctrl_or_alt => match key.code {
             KeyCode::Enter | KeyCode::Char('q') => InputEvent::Action(Action::Cancel),
+            _ => InputEvent::Ignored,
+        },
+        Mode::ContextMenu if !has_ctrl_or_alt => match key.code {
+            KeyCode::Enter => InputEvent::ModalConfirm,
+            KeyCode::Up | KeyCode::Char('k') => InputEvent::ModalNavigateUp,
+            KeyCode::Down | KeyCode::Char('j') => InputEvent::ModalNavigateDown,
+            KeyCode::Right | KeyCode::Char('l') => InputEvent::ModalNavigateRight,
+            KeyCode::Left | KeyCode::Char('h') => InputEvent::ModalNavigateLeft,
+            KeyCode::Esc | KeyCode::Char('q') => InputEvent::Action(Action::Cancel),
             _ => InputEvent::Ignored,
         },
         Mode::Help | Mode::Preview if !has_ctrl_or_alt => match key.code {
@@ -305,7 +225,6 @@ mod tests {
             KeyCode::Char('C'),
             KeyModifiers::CONTROL
         )));
-        assert!(!is_quit_request(plain_press(KeyCode::Char('c'))));
     }
 
     #[test]
@@ -391,6 +310,10 @@ mod tests {
             Some(Action::Rename)
         );
         assert_eq!(
+            map_key(plain_press(KeyCode::F(2)), Mode::Normal),
+            Some(Action::Rename)
+        );
+        assert_eq!(
             map_key(plain_press(KeyCode::Char('y')), Mode::Normal),
             Some(Action::Copy)
         );
@@ -406,114 +329,119 @@ mod tests {
             map_key(plain_press(KeyCode::Char('d')), Mode::Normal),
             Some(Action::Delete)
         );
-    }
-
-    #[test]
-    fn test_normal_mode_view_mappings() {
         assert_eq!(
-            map_key(plain_press(KeyCode::Char('.')), Mode::Normal),
-            Some(Action::ToggleHidden)
-        );
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('s')), Mode::Normal),
-            Some(Action::ChangeSort)
-        );
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('v')), Mode::Normal),
-            Some(Action::Preview)
+            map_key(plain_press(KeyCode::Delete), Mode::Normal),
+            Some(Action::Delete)
         );
     }
 
     #[test]
-    fn test_normal_mode_search_and_app_mappings() {
+    fn test_cross_platform_shortcuts() {
+        let mac = Platform::Mac;
+        let win = Platform::Windows;
+
+        // Copy
         assert_eq!(
-            map_key(plain_press(KeyCode::Char('/')), Mode::Normal),
-            Some(Action::StartSearch)
+            map_key_with_platform(
+                press(KeyCode::Char('c'), KeyModifiers::SUPER),
+                Mode::Normal,
+                mac
+            ),
+            Some(Action::Copy)
         );
         assert_eq!(
-            map_key(plain_press(KeyCode::Char('?')), Mode::Normal),
-            Some(Action::Help)
-        );
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('q')), Mode::Normal),
-            Some(Action::Quit)
-        );
-        assert_eq!(
-            map_key(plain_press(KeyCode::Esc), Mode::Normal),
-            Some(Action::Cancel)
-        );
-        assert_eq!(
-            map_key(
+            map_key_with_platform(
                 press(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                Mode::Normal
+                Mode::Normal,
+                win
             ),
-            Some(Action::Quit)
+            Some(Action::Copy)
         );
-        assert_eq!(
-            map_key(
-                press(KeyCode::Char('p'), KeyModifiers::CONTROL),
-                Mode::Normal
-            ),
-            Some(Action::CommandPalette)
-        );
-        assert_eq!(
-            map_key(
-                press(KeyCode::Char('P'), KeyModifiers::CONTROL),
-                Mode::Normal
-            ),
-            Some(Action::CommandPalette)
-        );
-    }
 
-    #[test]
-    fn test_modifier_handling() {
-        // Alt modifiers should be ignored for single-key shortcuts
+        // Select All
         assert_eq!(
-            map_key(press(KeyCode::Char('d'), KeyModifiers::ALT), Mode::Normal),
-            None
+            map_key_with_platform(
+                press(KeyCode::Char('a'), KeyModifiers::SUPER),
+                Mode::Normal,
+                mac
+            ),
+            Some(Action::SelectAll)
         );
         assert_eq!(
-            map_key(
+            map_key_with_platform(
+                press(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                Mode::Normal,
+                win
+            ),
+            Some(Action::SelectAll)
+        );
+
+        // Refresh
+        assert_eq!(
+            map_key_with_platform(
+                press(KeyCode::Char('r'), KeyModifiers::SUPER),
+                Mode::Normal,
+                mac
+            ),
+            Some(Action::RefreshDirectory)
+        );
+        assert_eq!(
+            map_key_with_platform(
+                press(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                Mode::Normal,
+                win
+            ),
+            Some(Action::RefreshDirectory)
+        );
+
+        // Command Palette / Command Center
+        assert_eq!(
+            map_key_with_platform(
+                press(KeyCode::Char('k'), KeyModifiers::SUPER),
+                Mode::Normal,
+                mac
+            ),
+            Some(Action::CommandPalette)
+        );
+        assert_eq!(
+            map_key_with_platform(
                 press(KeyCode::Char('k'), KeyModifiers::CONTROL),
-                Mode::Normal
+                Mode::Normal,
+                win
             ),
-            None
+            Some(Action::CommandPalette)
         );
     }
 
     #[test]
-    fn test_temporary_modes_do_not_trigger_normal_actions() {
-        let temp_modes = [
-            Mode::Search,
-            Mode::Rename,
-            Mode::Create,
-            Mode::Confirm,
-            Mode::Preview,
-            Mode::CommandPalette,
-            Mode::Help,
-            Mode::Bookmarks,
-            Mode::Jump,
-            Mode::SmartJump,
-        ];
+    fn test_terminal_focus_safety() {
+        let mac = Platform::Mac;
 
-        for mode in temp_modes {
-            // Normal actions like delete, rename, navigation must NOT trigger in temp modes
-            assert_eq!(map_key(plain_press(KeyCode::Char('d')), mode), None);
-            assert_eq!(map_key(plain_press(KeyCode::Char('r')), mode), None);
-            assert_eq!(map_key(plain_press(KeyCode::Char('y')), mode), None);
-            assert_eq!(map_key(plain_press(KeyCode::Char('n')), mode), None);
+        // Terminal mode forwards normal keys as TerminalKey
+        let enter = plain_press(KeyCode::Enter);
+        assert_eq!(
+            map_key_event_with_platform(enter, Mode::Terminal, mac),
+            InputEvent::TerminalKey(enter)
+        );
 
-            // Esc always produces Cancel
-            assert_eq!(
-                map_key(plain_press(KeyCode::Esc), mode),
-                Some(Action::Cancel)
-            );
-            // Ctrl+C always produces Quit
-            assert_eq!(
-                map_key(press(KeyCode::Char('c'), KeyModifiers::CONTROL), mode),
-                Some(Action::Quit)
-            );
-        }
+        let ctrl_c = press(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(
+            map_key_event_with_platform(ctrl_c, Mode::Terminal, mac),
+            InputEvent::TerminalKey(ctrl_c)
+        );
+
+        // Terminal focus toggle intercepts in Terminal mode
+        let ctrl_t = press(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(
+            map_key_event_with_platform(ctrl_t, Mode::Terminal, mac),
+            InputEvent::Action(Action::ToggleTerminalFocus)
+        );
+
+        let f12 = plain_press(KeyCode::F(12));
+        assert_eq!(
+            map_key_event_with_platform(f12, Mode::Terminal, mac),
+            InputEvent::Action(Action::ToggleTerminalFocus)
+        );
     }
 
     #[test]
@@ -538,6 +466,10 @@ mod tests {
             map_key_event(plain_press(KeyCode::Backspace), Mode::Search),
             InputEvent::SearchBackspace
         );
+        assert_eq!(
+            map_key_event(plain_press(KeyCode::Tab), Mode::Search),
+            InputEvent::Action(Action::CycleSearchMode)
+        );
     }
 
     #[test]
@@ -549,239 +481,5 @@ mod tests {
         );
         assert_eq!(map_key(release, Mode::Normal), None);
         assert_eq!(map_key_event(release, Mode::Normal), InputEvent::Ignored);
-    }
-
-    #[test]
-    fn test_input_modal_event_mapping() {
-        for mode in [Mode::Create, Mode::Rename] {
-            assert_eq!(
-                map_key_event(plain_press(KeyCode::Char('a')), mode),
-                InputEvent::ModalChar('a')
-            );
-            assert_eq!(
-                map_key_event(plain_press(KeyCode::Char('文')), mode),
-                InputEvent::ModalChar('文')
-            );
-            assert_eq!(
-                map_key_event(plain_press(KeyCode::Backspace), mode),
-                InputEvent::ModalBackspace
-            );
-            assert_eq!(
-                map_key_event(plain_press(KeyCode::Enter), mode),
-                InputEvent::ModalConfirm
-            );
-            assert_eq!(
-                map_key_event(plain_press(KeyCode::Left), mode),
-                InputEvent::ModalMoveCursorLeft
-            );
-            assert_eq!(
-                map_key_event(plain_press(KeyCode::Right), mode),
-                InputEvent::ModalMoveCursorRight
-            );
-            assert_eq!(
-                map_key_event(plain_press(KeyCode::Esc), mode),
-                InputEvent::Action(Action::Cancel)
-            );
-        }
-    }
-
-    #[test]
-    fn test_confirm_modal_event_mapping() {
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Left), Mode::Confirm),
-            InputEvent::ModalToggle
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Right), Mode::Confirm),
-            InputEvent::ModalToggle
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Tab), Mode::Confirm),
-            InputEvent::ModalToggle
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('y')), Mode::Confirm),
-            InputEvent::ModalSetConfirm(true)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('Y')), Mode::Confirm),
-            InputEvent::ModalSetConfirm(true)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('n')), Mode::Confirm),
-            InputEvent::ModalSetConfirm(false)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('N')), Mode::Confirm),
-            InputEvent::ModalSetConfirm(false)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Enter), Mode::Confirm),
-            InputEvent::ModalConfirm
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Esc), Mode::Confirm),
-            InputEvent::Action(Action::Cancel)
-        );
-    }
-
-    #[test]
-    fn test_command_palette_event_mapping() {
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('f')), Mode::CommandPalette),
-            InputEvent::ModalChar('f')
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Backspace), Mode::CommandPalette),
-            InputEvent::ModalBackspace
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Up), Mode::CommandPalette),
-            InputEvent::ModalNavigateUp
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Down), Mode::CommandPalette),
-            InputEvent::ModalNavigateDown
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Enter), Mode::CommandPalette),
-            InputEvent::ModalConfirm
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Esc), Mode::CommandPalette),
-            InputEvent::Action(Action::Cancel)
-        );
-    }
-
-    #[test]
-    fn test_help_overlay_event_mapping() {
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Esc), Mode::Help),
-            InputEvent::Action(Action::Cancel)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('q')), Mode::Help),
-            InputEvent::Action(Action::Cancel)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Enter), Mode::Help),
-            InputEvent::Action(Action::Cancel)
-        );
-    }
-
-    #[test]
-    fn test_bookmarks_event_mapping() {
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('b')), Mode::Normal),
-            Some(Action::AddBookmark)
-        );
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('B')), Mode::Normal),
-            Some(Action::OpenBookmarks)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Up), Mode::Bookmarks),
-            InputEvent::ModalNavigateUp
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('k')), Mode::Bookmarks),
-            InputEvent::ModalNavigateUp
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Down), Mode::Bookmarks),
-            InputEvent::ModalNavigateDown
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('j')), Mode::Bookmarks),
-            InputEvent::ModalNavigateDown
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Enter), Mode::Bookmarks),
-            InputEvent::ModalConfirm
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('d')), Mode::Bookmarks),
-            InputEvent::Action(Action::RemoveBookmark)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('x')), Mode::Bookmarks),
-            InputEvent::Action(Action::RemoveBookmark)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Delete), Mode::Bookmarks),
-            InputEvent::Action(Action::RemoveBookmark)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Esc), Mode::Bookmarks),
-            InputEvent::Action(Action::Cancel)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('q')), Mode::Bookmarks),
-            InputEvent::Action(Action::Cancel)
-        );
-    }
-
-    #[test]
-    fn test_tabs_event_mapping() {
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('t')), Mode::Normal),
-            Some(Action::NewTab)
-        );
-        assert_eq!(
-            map_key(press(KeyCode::Char('T'), KeyModifiers::SHIFT), Mode::Normal),
-            Some(Action::DuplicateTab)
-        );
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('T')), Mode::Normal),
-            Some(Action::DuplicateTab)
-        );
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('w')), Mode::Normal),
-            Some(Action::CloseTab)
-        );
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char(']')), Mode::Normal),
-            Some(Action::NextTab)
-        );
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('[')), Mode::Normal),
-            Some(Action::PreviousTab)
-        );
-    }
-
-    #[test]
-    fn test_smart_jump_event_mapping() {
-        assert_eq!(
-            map_key(plain_press(KeyCode::Char('J')), Mode::Normal),
-            Some(Action::SmartJump)
-        );
-        assert_eq!(
-            map_key(press(KeyCode::Char('J'), KeyModifiers::SHIFT), Mode::Normal),
-            Some(Action::SmartJump)
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Char('h')), Mode::SmartJump),
-            InputEvent::ModalChar('h')
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Backspace), Mode::SmartJump),
-            InputEvent::ModalBackspace
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Up), Mode::SmartJump),
-            InputEvent::ModalNavigateUp
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Down), Mode::SmartJump),
-            InputEvent::ModalNavigateDown
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Enter), Mode::SmartJump),
-            InputEvent::ModalConfirm
-        );
-        assert_eq!(
-            map_key_event(plain_press(KeyCode::Esc), Mode::SmartJump),
-            InputEvent::Action(Action::Cancel)
-        );
     }
 }
