@@ -323,10 +323,11 @@ fn get_child_process_cwd(pid: libc::pid_t) -> Option<std::path::PathBuf> {
 #[cfg(target_os = "linux")]
 fn get_child_process_cwd(pid: libc::pid_t) -> Option<std::path::PathBuf> {
     let proc_path = format!("/proc/{pid}/cwd");
-    if let Ok(target) = std::fs::read_link(proc_path) {
-        if target.exists() && target.is_dir() {
-            return Some(target);
-        }
+    if let Ok(target) = std::fs::read_link(proc_path)
+        && target.exists()
+        && target.is_dir()
+    {
+        return Some(target);
     }
     None
 }
