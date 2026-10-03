@@ -64,7 +64,7 @@ impl PtySession {
                 &mut slave_fd,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut ws,
+                &raw mut ws,
             )
         };
 
