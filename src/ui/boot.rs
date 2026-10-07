@@ -98,7 +98,7 @@ fn render_wake(frame: &mut Frame, area: Rect, local_p: f32, theme: &Theme, symbo
 }
 
 /// Renders Phase 2: Progressive reveal of TerminalVision identity.
-fn render_identity(frame: &mut Frame, area: Rect, _local_p: f32, theme: &Theme, symbols: &Symbols) {
+fn render_identity(frame: &mut Frame, area: Rect, local_p: f32, theme: &Theme, symbols: &Symbols) {
     let box_w = 48.min(area.width.saturating_sub(4));
     let box_h = 7.min(area.height.saturating_sub(2));
     let box_x = area.x + (area.width.saturating_sub(box_w)) / 2;
@@ -125,15 +125,28 @@ fn render_identity(frame: &mut Frame, area: Rect, _local_p: f32, theme: &Theme, 
     let inner = card_block.inner(card_rect);
     frame.render_widget(card_block, card_rect);
 
+    let full_title = "T E R M I N A L V I S I O N";
+    let title_chars_len = ((local_p / 0.65).clamp(0.0, 1.0) * full_title.len() as f32) as usize;
+    let visible_title = &full_title[..title_chars_len.min(full_title.len())];
+
     let title_line = Line::from(vec![Span::styled(
-        "T E R M I N A L V I S I O N",
+        visible_title,
         theme.primary().add_modifier(Modifier::BOLD),
     )]);
 
-    let subtitle_line = Line::from(vec![Span::styled(
-        format!("SEE {sep} UNDERSTAND {sep} CONTROL"),
-        theme.secondary(),
-    )]);
+    let subtitle_style = if local_p < 0.85 {
+        theme.muted()
+    } else {
+        theme.secondary()
+    };
+    let subtitle_line = if local_p >= 0.40 {
+        Line::from(vec![Span::styled(
+            format!("SEE {sep} UNDERSTAND {sep} CONTROL"),
+            subtitle_style,
+        )])
+    } else {
+        Line::default()
+    };
 
     let text_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -160,7 +173,7 @@ fn render_system_readiness(
     frame: &mut Frame,
     area: Rect,
     boot_state: &BootState,
-    _local_p: f32,
+    local_p: f32,
     theme: &Theme,
     symbols: &Symbols,
 ) {
@@ -176,6 +189,7 @@ fn render_system_readiness(
     } else {
         "—"
     };
+    let dot = symbols.focus_bullet;
     let border_type = if symbols.focus_bullet == "*" {
         BorderType::Plain
     } else {
@@ -198,79 +212,119 @@ fn render_system_readiness(
 
     let mut lines = Vec::new();
 
-    // 1. Filesystem
-    if boot_state.filesystem_ready {
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {check} "), theme.success()),
-            Span::styled("Filesystem       ", theme.primary()),
-            Span::styled("READY", theme.success().add_modifier(Modifier::BOLD)),
-        ]));
+    // 1. Filesystem (threshold: 0.12)
+    if local_p >= 0.12 {
+        if boot_state.filesystem_ready {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {check} "), theme.success()),
+                Span::styled("Filesystem       ", theme.primary()),
+                Span::styled("READY", theme.success().add_modifier(Modifier::BOLD)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {dash} "), theme.warning()),
+                Span::styled("Filesystem       ", theme.primary()),
+                Span::styled("UNAVAILABLE", theme.warning()),
+            ]));
+        }
     } else {
         lines.push(Line::from(vec![
-            Span::styled(format!(" {dash} "), theme.warning()),
-            Span::styled("Filesystem       ", theme.primary()),
-            Span::styled("UNAVAILABLE", theme.warning()),
+            Span::styled(format!(" {dot} "), theme.warning()),
+            Span::styled("Filesystem       ", theme.muted()),
+            Span::styled("INITIALIZING", theme.muted()),
         ]));
     }
 
-    // 2. Terminal
-    if boot_state.terminal_ready {
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {check} "), theme.success()),
-            Span::styled("Terminal         ", theme.primary()),
-            Span::styled("READY", theme.success().add_modifier(Modifier::BOLD)),
-        ]));
+    // 2. Terminal (threshold: 0.32)
+    if local_p >= 0.32 {
+        if boot_state.terminal_ready {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {check} "), theme.success()),
+                Span::styled("Terminal         ", theme.primary()),
+                Span::styled("READY", theme.success().add_modifier(Modifier::BOLD)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {dash} "), theme.muted()),
+                Span::styled("Terminal         ", theme.muted()),
+                Span::styled("STANDBY", theme.muted()),
+            ]));
+        }
     } else {
         lines.push(Line::from(vec![
             Span::styled(format!(" {dash} "), theme.muted()),
             Span::styled("Terminal         ", theme.muted()),
-            Span::styled("STANDBY", theme.muted()),
+            Span::styled("PENDING", theme.muted()),
         ]));
     }
 
-    // 3. Configuration
-    if boot_state.config_ready {
+    // 3. Configuration (threshold: 0.52)
+    if local_p >= 0.52 {
+        if boot_state.config_ready {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {check} "), theme.success()),
+                Span::styled("Configuration    ", theme.primary()),
+                Span::styled("LOADED", theme.success().add_modifier(Modifier::BOLD)),
+            ]));
+        }
+    } else {
         lines.push(Line::from(vec![
-            Span::styled(format!(" {check} "), theme.success()),
-            Span::styled("Configuration    ", theme.primary()),
-            Span::styled("LOADED", theme.success().add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {dash} "), theme.muted()),
+            Span::styled("Configuration    ", theme.muted()),
+            Span::styled("PENDING", theme.muted()),
         ]));
     }
 
-    // 4. Project
-    if let Some(ref p_type) = boot_state.project_type {
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {check} "), theme.success()),
-            Span::styled("Project          ", theme.primary()),
-            Span::styled(
-                p_type.to_uppercase(),
-                theme.primary().add_modifier(Modifier::BOLD),
-            ),
-        ]));
+    // 4. Project (threshold: 0.72)
+    if local_p >= 0.72 {
+        if let Some(ref p_type) = boot_state.project_type {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {check} "), theme.success()),
+                Span::styled("Project          ", theme.primary()),
+                Span::styled(
+                    p_type.to_uppercase(),
+                    theme.primary().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {dash} "), theme.muted()),
+                Span::styled("Project          ", theme.muted()),
+                Span::styled("NOT DETECTED", theme.muted()),
+            ]));
+        }
     } else {
         lines.push(Line::from(vec![
             Span::styled(format!(" {dash} "), theme.muted()),
             Span::styled("Project          ", theme.muted()),
-            Span::styled("NOT DETECTED", theme.muted()),
+            Span::styled("ANALYZING", theme.muted()),
         ]));
     }
 
-    // 5. Git
-    if let Some(ref branch) = boot_state.git_branch {
-        let dirty_suffix = if boot_state.git_dirty { "*" } else { "" };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {check} "), theme.success()),
-            Span::styled("Git              ", theme.primary()),
-            Span::styled(
-                format!("{branch}{dirty_suffix}"),
-                theme.secondary().add_modifier(Modifier::BOLD),
-            ),
-        ]));
+    // 5. Git (threshold: 0.88)
+    if local_p >= 0.88 {
+        if let Some(ref branch) = boot_state.git_branch {
+            let dirty_suffix = if boot_state.git_dirty { "*" } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {check} "), theme.success()),
+                Span::styled("Git              ", theme.primary()),
+                Span::styled(
+                    format!("{branch}{dirty_suffix}"),
+                    theme.secondary().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {dash} "), theme.muted()),
+                Span::styled("Git              ", theme.muted()),
+                Span::styled("NOT DETECTED", theme.muted()),
+            ]));
+        }
     } else {
         lines.push(Line::from(vec![
             Span::styled(format!(" {dash} "), theme.muted()),
             Span::styled("Git              ", theme.muted()),
-            Span::styled("NOT DETECTED", theme.muted()),
+            Span::styled("INSPECTING", theme.muted()),
         ]));
     }
 
@@ -282,7 +336,7 @@ fn render_project_awareness(
     frame: &mut Frame,
     area: Rect,
     boot_state: &BootState,
-    _local_p: f32,
+    local_p: f32,
     theme: &Theme,
     symbols: &Symbols,
 ) {
@@ -356,8 +410,12 @@ fn render_project_awareness(
 
         // Structure items
         if !boot_state.project_structure_items.is_empty() {
-            for (item_name, exists) in &boot_state.project_structure_items {
-                if *exists {
+            let max_items = boot_state.project_structure_items.len();
+            let visible_items =
+                ((local_p / 0.85).clamp(0.0, 1.0) * max_items as f32).ceil() as usize;
+            for (idx, (item_name, exists)) in boot_state.project_structure_items.iter().enumerate()
+            {
+                if *exists && idx < visible_items {
                     let padding = 20usize.saturating_sub(display_width(item_name));
                     let pad_str = " ".repeat(padding);
                     lines.push(Line::from(vec![

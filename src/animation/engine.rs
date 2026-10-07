@@ -86,6 +86,21 @@ impl<C: AnimationClock> AnimationEngine<C> {
         id
     }
 
+    /// Starts a new animation track with the exact duration specified, without secondary mode adjustment.
+    pub fn start_raw(
+        &mut self,
+        tag: AnimationTag,
+        duration: Duration,
+        easing: Easing,
+    ) -> AnimationId {
+        let now = self.clock.now();
+        self.cancel_tag(tag);
+        let animation = Animation::new(tag, now, duration, easing);
+        let id = animation.id();
+        self.animations.push(animation);
+        id
+    }
+
     /// Evaluates current progress for a given `AnimationId`.
     pub fn progress(&self, id: AnimationId) -> Option<AnimationProgress> {
         let now = self.clock.now();

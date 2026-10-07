@@ -925,17 +925,7 @@ impl Pane {
     /// Adds a new tab pointing at `path` with `entries`, making it active.
     /// Returns the index of the newly created tab.
     pub fn new_tab(&mut self, path: PathBuf, entries: Vec<Entry>) -> usize {
-        let git_status = crate::git::compute_status(&path);
-        let project_info = crate::git::detect_project_for_path(&path, &git_status);
-        let workspace_context = crate::project::analyze_workspace(&path);
-        let mut tab = Tab {
-            current_path: path,
-            git_status,
-            project_info,
-            workspace_context,
-            ..Default::default()
-        };
-        tab.set_entries(entries);
+        let mut tab = Tab::new(path, entries);
         tab.select_first(self.visible_rows);
         self.tabs.push(tab);
         self.active_tab_index = self.tabs.len() - 1;
@@ -2879,6 +2869,7 @@ pub struct App {
     terminal: AppTerminal,
     last_sync_origin: SyncOrigin,
     last_synced_terminal_cwd: Option<PathBuf>,
+    pending_terminal_sync: Option<(PathBuf, std::time::Instant)>,
     filesystem_watcher: crate::filesystem::FilesystemWatcher,
     operation_manager: crate::operations::OperationManager,
     storage_vision: crate::storage::StorageVisionState,
@@ -3098,13 +3089,15 @@ impl App {
             || paths_are_equivalent(&self.terminal_cwd(), &path)
         {
             self.last_synced_terminal_cwd = Some(path);
+            self.pending_terminal_sync = None;
             return;
         }
         if let Ok(guard) = self.terminal.0.lock()
             && let Some(term) = guard.as_ref()
         {
             let _ = term.cd_to_path(&path);
-            self.last_synced_terminal_cwd = Some(path);
+            self.last_synced_terminal_cwd = Some(path.clone());
+            self.pending_terminal_sync = Some((path, std::time::Instant::now()));
         }
     }
 
@@ -3173,7 +3166,16 @@ impl App {
         // 1. Check shell process working directory
         let shell_cwd = self.terminal_cwd();
         let active_fm_cwd = self.pane(self.active_pane).current_path().clone();
-        if !paths_are_equivalent(&shell_cwd, &active_fm_cwd)
+
+        if let Some((ref pending, started_at)) = self.pending_terminal_sync {
+            if paths_are_equivalent(&shell_cwd, pending) {
+                self.pending_terminal_sync = None;
+                self.last_synced_terminal_cwd = Some(shell_cwd);
+            } else if started_at.elapsed() > std::time::Duration::from_millis(1500) {
+                // Pending sync timed out
+                self.pending_terminal_sync = None;
+            }
+        } else if !paths_are_equivalent(&shell_cwd, &active_fm_cwd)
             && shell_cwd.exists()
             && shell_cwd.is_dir()
             && self.handle_shell_cwd_change(shell_cwd)
@@ -4797,7 +4799,7 @@ impl App {
             ));
 
             self.animations
-                .start(crate::animation::AnimationTag::VisionBoot, duration, easing);
+                .start_raw(crate::animation::AnimationTag::VisionBoot, duration, easing);
             self.mode = Mode::Boot;
         } else {
             self.boot_state = None;
@@ -6320,6 +6322,8 @@ impl App {
             Ok(entries) => {
                 self.active_pane_mut().new_tab(current_path, entries);
                 self.refresh_preview();
+                self.last_sync_origin = SyncOrigin::FileManagerNavigation;
+                self.sync_terminal_to_directory();
             }
             Err(err) => {
                 self.report_navigation(Err(NavigationError::Directory(err)));
