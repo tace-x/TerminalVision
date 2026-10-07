@@ -20,6 +20,7 @@ use crate::filesystem::navigation::{
 };
 use crate::filesystem::operations::{Operation, OperationError, OperationOutcome};
 use crate::git::{GitRepository, GitStatus, ProjectInfo};
+use crate::project::WorkspaceContext;
 use crate::search::{CancelToken, Matcher, SearchMode};
 use crate::ui::theme::{Theme, ThemeId, ThemeRegistry};
 use crate::utils::path::{paths_are_equivalent, safe_fallback_directory};
@@ -183,6 +184,7 @@ pub struct Tab {
     scroll_offset: usize,
     git_status: GitStatus,
     project_info: ProjectInfo,
+    workspace_context: WorkspaceContext,
     /// Ordered list of directories visited by this tab, newest at the end.
     history: Vec<PathBuf>,
     /// Index into `history` that `current_path` corresponds to.
@@ -199,6 +201,7 @@ impl Tab {
     pub fn new(path: PathBuf, entries: Vec<Entry>) -> Self {
         let git_status = crate::git::compute_status(&path);
         let project_info = crate::git::detect_project_for_path(&path, &git_status);
+        let workspace_context = crate::project::analyze_workspace(&path);
         let history = if path.as_os_str().is_empty() {
             Vec::new()
         } else {
@@ -215,6 +218,7 @@ impl Tab {
             scroll_offset: 0,
             git_status,
             project_info,
+            workspace_context,
             history,
             history_index: 0,
             show_hidden: false,
@@ -235,6 +239,7 @@ impl Tab {
     pub fn set_current_path(&mut self, path: PathBuf) {
         self.git_status = crate::git::compute_status(&path);
         self.project_info = crate::git::detect_project_for_path(&path, &self.git_status);
+        self.workspace_context = crate::project::analyze_workspace(&path);
         self.current_path = path;
     }
 
@@ -325,11 +330,17 @@ impl Tab {
         &self.project_info
     }
 
-    /// Re-evaluates Git status and project information for the current directory.
+    /// The workspace structure and project graph context of this tab.
+    pub fn workspace_context(&self) -> &WorkspaceContext {
+        &self.workspace_context
+    }
+
+    /// Re-evaluates Git status, project information, and workspace context for the current directory.
     pub fn refresh_git_and_project(&mut self) {
         self.git_status = crate::git::compute_status(&self.current_path);
         self.project_info =
             crate::git::detect_project_for_path(&self.current_path, &self.git_status);
+        self.workspace_context = crate::project::analyze_workspace(&self.current_path);
     }
 
     /// Short display name for this tab (e.g. folder name, "/" for root, or "[empty]").
@@ -901,7 +912,12 @@ impl Pane {
         self.active_tab().project_info()
     }
 
-    /// Re-evaluates Git status and project information for the active tab.
+    /// The workspace structure and project graph context of the active tab.
+    pub fn workspace_context(&self) -> &WorkspaceContext {
+        self.active_tab().workspace_context()
+    }
+
+    /// Re-evaluates Git status, project information, and workspace context for the active tab.
     pub fn refresh_git_and_project(&mut self) {
         self.active_tab_mut().refresh_git_and_project();
     }
@@ -911,10 +927,12 @@ impl Pane {
     pub fn new_tab(&mut self, path: PathBuf, entries: Vec<Entry>) -> usize {
         let git_status = crate::git::compute_status(&path);
         let project_info = crate::git::detect_project_for_path(&path, &git_status);
+        let workspace_context = crate::project::analyze_workspace(&path);
         let mut tab = Tab {
             current_path: path,
             git_status,
             project_info,
+            workspace_context,
             ..Default::default()
         };
         tab.set_entries(entries);
@@ -2575,6 +2593,23 @@ impl ProjectCockpitState {
             self.selected = (self.selected + 1).min(self.actions.len() - 1);
         }
     }
+
+    /// Sets the selected index.
+    pub fn select(&mut self, index: usize) {
+        if index < self.actions.len() {
+            self.selected = index;
+        }
+    }
+
+    /// Moves selection up (alias for move_up).
+    pub fn select_previous(&mut self) {
+        self.move_up();
+    }
+
+    /// Moves selection down (alias for move_down).
+    pub fn select_next(&mut self) {
+        self.move_down();
+    }
 }
 
 /// A changed file entry in the Git status panel.
@@ -2782,222 +2817,7 @@ impl RevealContextState {
         }
     }
 }
-
-/// An item in a contextual action popup menu.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContextMenuItem {
-    /// Action that can be executed.
-    Action {
-        action: Action,
-        label: String,
-        shortcut: Option<String>,
-    },
-    /// Submenu (More ›).
-    More {
-        label: String,
-        items: Vec<ContextMenuItem>,
-    },
-    /// Disabled action (e.g. Paste when clipboard is empty).
-    Disabled {
-        label: String,
-        reason: Option<String>,
-    },
-    /// Visual separator line.
-    Separator,
-}
-
-impl ContextMenuItem {
-    /// Whether this item can be selected/navigated to.
-    pub fn is_selectable(&self) -> bool {
-        matches!(self, Self::Action { .. } | Self::More { .. })
-    }
-
-    /// The display label of this item.
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Action { label, .. }
-            | Self::More { label, .. }
-            | Self::Disabled { label, .. } => label,
-            Self::Separator => "",
-        }
-    }
-}
-
-/// The state of an open contextual action menu.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ContextMenuState {
-    /// Top-level menu items.
-    pub items: Vec<ContextMenuItem>,
-    /// Selected index in top-level menu.
-    pub selected: usize,
-    /// Origin screen position (x, y) where the menu was summoned.
-    pub position: (u16, u16),
-    /// Whether the "More ›" submenu is currently expanded.
-    pub is_more_open: bool,
-    /// Selected index in the submenu when `is_more_open` is true.
-    pub more_selected: usize,
-    /// The screen Rect where the main context menu was rendered.
-    pub main_area: Option<ratatui::layout::Rect>,
-    /// The screen Rect where the submenu was rendered.
-    pub more_area: Option<ratatui::layout::Rect>,
-}
-
-impl ContextMenuState {
-    /// Creates a new context menu state.
-    pub fn new(items: Vec<ContextMenuItem>, position: (u16, u16)) -> Self {
-        let mut state = Self {
-            items,
-            selected: 0,
-            position,
-            is_more_open: false,
-            more_selected: 0,
-            main_area: None,
-            more_area: None,
-        };
-        state.ensure_valid_selection();
-        state
-    }
-
-    /// Ensures `selected` points to a selectable item.
-    fn ensure_valid_selection(&mut self) {
-        if self.items.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        if self.selected >= self.items.len() || !self.items[self.selected].is_selectable() {
-            if let Some(first) = self.items.iter().position(ContextMenuItem::is_selectable) {
-                self.selected = first;
-            } else {
-                self.selected = 0;
-            }
-        }
-    }
-
-    /// Moves selection up to the previous selectable item.
-    pub fn move_up(&mut self) {
-        if self.is_more_open {
-            if let Some(ContextMenuItem::More { items, .. }) = self.items.get(self.selected)
-                && !items.is_empty()
-            {
-                let mut prev = self.more_selected;
-                loop {
-                    if prev == 0 {
-                        prev = items.len().saturating_sub(1);
-                    } else {
-                        prev -= 1;
-                    }
-                    if items.get(prev).is_some_and(ContextMenuItem::is_selectable)
-                        || prev == self.more_selected
-                    {
-                        break;
-                    }
-                }
-                self.more_selected = prev;
-            }
-            return;
-        }
-
-        if self.items.is_empty() {
-            return;
-        }
-        let mut prev = self.selected;
-        loop {
-            if prev == 0 {
-                prev = self.items.len().saturating_sub(1);
-            } else {
-                prev -= 1;
-            }
-            if self
-                .items
-                .get(prev)
-                .is_some_and(ContextMenuItem::is_selectable)
-                || prev == self.selected
-            {
-                break;
-            }
-        }
-        self.selected = prev;
-    }
-
-    /// Moves selection down to the next selectable item.
-    pub fn move_down(&mut self) {
-        if self.is_more_open {
-            if let Some(ContextMenuItem::More { items, .. }) = self.items.get(self.selected)
-                && !items.is_empty()
-            {
-                let mut next = self.more_selected;
-                loop {
-                    next = (next + 1) % items.len();
-                    if items.get(next).is_some_and(ContextMenuItem::is_selectable)
-                        || next == self.more_selected
-                    {
-                        break;
-                    }
-                }
-                self.more_selected = next;
-            }
-            return;
-        }
-
-        if self.items.is_empty() {
-            return;
-        }
-        let mut next = self.selected;
-        loop {
-            next = (next + 1) % self.items.len();
-            if self
-                .items
-                .get(next)
-                .is_some_and(ContextMenuItem::is_selectable)
-                || next == self.selected
-            {
-                break;
-            }
-        }
-        self.selected = next;
-    }
-
-    /// Expands the More submenu if currently focused on a More item.
-    pub fn open_more(&mut self) {
-        if let Some(ContextMenuItem::More { items, .. }) = self.items.get(self.selected)
-            && !items.is_empty()
-        {
-            self.is_more_open = true;
-            self.more_selected = 0;
-            if let Some(first) = items.iter().position(ContextMenuItem::is_selectable) {
-                self.more_selected = first;
-            }
-        }
-    }
-
-    /// Closes the More submenu.
-    pub fn close_more(&mut self) {
-        self.is_more_open = false;
-        self.more_selected = 0;
-    }
-
-    /// Returns the currently active selected action, if any.
-    pub fn selected_action(&self) -> Option<Action> {
-        if self.is_more_open {
-            if let Some(ContextMenuItem::More { items, .. }) = self.items.get(self.selected)
-                && let Some(ContextMenuItem::Action { action, .. }) = items.get(self.more_selected)
-            {
-                return Some(*action);
-            }
-            return None;
-        }
-
-        match self.items.get(self.selected) {
-            Some(ContextMenuItem::Action { action, .. }) => Some(*action),
-            _ => None,
-        }
-    }
-
-    /// Whether the menu has no items.
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-}
+pub use crate::commands::context_menu::*;
 
 /// The kind of entry being created in a creation dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3063,9 +2883,11 @@ pub struct App {
     operation_manager: crate::operations::OperationManager,
     storage_vision: crate::storage::StorageVisionState,
     motion: crate::ui::motion::MotionState,
+    animations: crate::animation::AnimationEngine,
     active_theme: ThemeId,
     preview_theme: Option<ThemeId>,
     theme_selector: ThemeSelectorState,
+    boot_state: Option<crate::animation::BootState>,
 }
 
 impl App {
@@ -3119,6 +2941,7 @@ impl App {
 
         if which == self.active_pane {
             self.refresh_preview();
+            self.trigger_navigation_animation();
             if self.last_sync_origin != SyncOrigin::ShellCwdChange {
                 self.last_sync_origin = SyncOrigin::FileManagerNavigation;
                 self.sync_terminal_to_directory();
@@ -3325,6 +3148,26 @@ impl App {
 
         if self.motion.is_active(std::time::Instant::now()) {
             updated = true;
+        }
+
+        if self.animations.tick() {
+            updated = true;
+        }
+
+        // Advance Vision Boot state machine if active
+        if self.mode == Mode::Boot {
+            if let Some(prog) = self
+                .animations
+                .tag_progress(crate::animation::AnimationTag::VisionBoot)
+            {
+                if prog.state.is_finished() {
+                    self.finish_boot();
+                    updated = true;
+                }
+            } else {
+                self.finish_boot();
+                updated = true;
+            }
         }
 
         // 1. Check shell process working directory
@@ -3956,7 +3799,9 @@ impl App {
     /// longer showing would be misleading.
     pub fn report_navigation(&mut self, outcome: Result<(), NavigationError>) {
         match outcome {
-            Ok(()) => self.notification.clear(),
+            Ok(()) => {
+                self.notification.clear();
+            }
             Err(error) => self.notification.show(Notice::from(&error)),
         }
     }
@@ -3978,7 +3823,9 @@ impl App {
             // Leaves whatever temporary mode is active, throwing away a
             // search that was being entered. In `Normal`, clears multi-selection if any exists.
             Action::Cancel => {
-                if self.mode == Mode::StorageVision {
+                if self.mode == Mode::Boot {
+                    self.skip_boot();
+                } else if self.mode == Mode::StorageVision {
                     self.storage_vision.cancel();
                     self.leave_temporary_mode();
                 } else if self.mode == Mode::ThemeSelector {
@@ -4109,10 +3956,12 @@ impl App {
         match action {
             Action::MoveUp => {
                 self.active_pane_mut().move_selection_up(1);
+                self.trigger_selection_animation();
                 self.refresh_preview();
             }
             Action::MoveDown => {
                 self.active_pane_mut().move_selection_down(1);
+                self.trigger_selection_animation();
                 self.refresh_preview();
             }
             // A page is one window of rows. The pane knows how many of its
@@ -4121,19 +3970,23 @@ impl App {
             Action::PageUp => {
                 let rows = self.pane(self.active_pane).visible_rows();
                 self.active_pane_mut().move_selection_up(rows);
+                self.trigger_selection_animation();
                 self.refresh_preview();
             }
             Action::PageDown => {
                 let rows = self.pane(self.active_pane).visible_rows();
                 self.active_pane_mut().move_selection_down(rows);
+                self.trigger_selection_animation();
                 self.refresh_preview();
             }
             Action::GoHome => {
                 self.active_pane_mut().select_first();
+                self.trigger_selection_animation();
                 self.refresh_preview();
             }
             Action::GoEnd => {
                 self.active_pane_mut().select_last();
+                self.trigger_selection_animation();
                 self.refresh_preview();
             }
 
@@ -4147,23 +4000,29 @@ impl App {
                 let idx = self.active_pane_mut().selected_index();
                 if let Some(i) = idx {
                     self.active_pane_mut().toggle_selection(i);
+                    self.trigger_selection_animation();
                 }
             }
             Action::SelectAll => {
                 self.active_pane_mut().select_all();
+                self.trigger_selection_animation();
             }
             Action::DeselectAll => {
                 self.active_pane_mut().deselect_all();
+                self.trigger_selection_animation();
             }
             Action::InvertSelection => {
                 self.active_pane_mut().invert_selection();
+                self.trigger_selection_animation();
             }
             Action::SelectRangeUp => {
                 self.active_pane_mut().extend_selection_up(1);
+                self.trigger_selection_animation();
                 self.refresh_preview();
             }
             Action::SelectRangeDown => {
                 self.active_pane_mut().extend_selection_down(1);
+                self.trigger_selection_animation();
                 self.refresh_preview();
             }
             Action::ContextMenu => {
@@ -4171,12 +4030,68 @@ impl App {
                 let sel_idx = pane.selected_index().unwrap_or(0);
                 let scroll = pane.scroll_offset();
                 let rel_row = sel_idx.saturating_sub(scroll) as u16;
-                let pos_x = 10;
+                let pos_x = match self.active_pane {
+                    ActivePane::Left => 10,
+                    ActivePane::Right => 50,
+                };
                 let pos_y = (4 + rel_row).max(2);
                 self.open_context_menu((pos_x, pos_y));
             }
             Action::GetInfo => {
                 self.open_reveal_context();
+            }
+            Action::CopyPath => {
+                let pane = self.pane(self.active_pane);
+                let paths = pane.effective_selected_paths();
+                if paths.is_empty() {
+                    let cur = pane.current_path();
+                    self.notification
+                        .show_message(format!("Copied path: {}", cur.display()));
+                } else if paths.len() == 1 {
+                    self.notification
+                        .show_message(format!("Copied path: {}", paths[0].display()));
+                } else {
+                    self.notification
+                        .show_message(format!("Copied {} paths to clipboard", paths.len()));
+                }
+            }
+            Action::CopyName => {
+                let pane = self.pane(self.active_pane);
+                let paths = pane.effective_selected_paths();
+                if paths.is_empty() {
+                    let cur = pane.current_path();
+                    let name = cur
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.notification
+                        .show_message(format!("Copied name: {name}"));
+                } else if paths.len() == 1 {
+                    let name = paths[0]
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.notification
+                        .show_message(format!("Copied name: {name}"));
+                } else {
+                    self.notification
+                        .show_message(format!("Copied {} names to clipboard", paths.len()));
+                }
+            }
+            Action::OpenInNewTab => {
+                let target = self
+                    .pane(self.active_pane)
+                    .selected_entry()
+                    .and_then(|e| {
+                        if e.is_dir() {
+                            Some(e.path().to_path_buf())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| self.pane(self.active_pane).current_path().clone());
+                self.open_path_in_new_tab(target);
+                self.notification.show_message("Opened in new tab");
             }
 
             // Pasting changes the filesystem. What happened is recorded by the
@@ -4190,6 +4105,7 @@ impl App {
             Action::SwitchPane => {
                 self.active_pane = self.active_pane.other();
                 self.last_sync_origin = SyncOrigin::ActivePaneSwitch;
+                self.trigger_focus_animation();
                 self.refresh_preview();
                 self.sync_terminal_to_directory();
             }
@@ -4339,12 +4255,7 @@ impl App {
                 }
             }
             Action::GoProjectRoot => {
-                if let Some(root) = self.pane(self.active_pane).project_info().root.clone() {
-                    let which = self.active_pane;
-                    let outcome = self.open_in(which, root);
-                    self.report_navigation(outcome);
-                    self.refresh_preview();
-                }
+                self.go_project_root();
             }
             Action::ProjectCockpit => {
                 self.open_project_cockpit();
@@ -4369,6 +4280,12 @@ impl App {
             }
             Action::GoSourceDir => {
                 self.go_source_dir();
+            }
+            Action::GoTestsDir => {
+                self.go_tests_dir();
+            }
+            Action::GoDocsDir => {
+                self.go_docs_dir();
             }
             Action::ToggleFocusMode => {
                 self.toggle_focus_mode();
@@ -4479,6 +4396,17 @@ impl App {
         self.reveal_context = RevealContextState::new();
         self.preview_theme = None;
         self.preview.active = false;
+        self.boot_state = None;
+        self.animations
+            .cancel_tag(crate::animation::AnimationTag::VisionBoot);
+        self.animations
+            .cancel_tag(crate::animation::AnimationTag::Dialog);
+        self.animations
+            .cancel_tag(crate::animation::AnimationTag::CommandCenter);
+        self.animations
+            .cancel_tag(crate::animation::AnimationTag::QuickSwitcher);
+        self.animations
+            .cancel_tag(crate::animation::AnimationTag::ContextMenu);
         self.refresh_preview();
     }
 
@@ -4593,11 +4521,113 @@ impl App {
         if mode != self.mode {
             if mode.is_modal() {
                 self.motion.notify_dialog_opened();
+                match mode {
+                    Mode::CommandPalette => {
+                        self.trigger_command_center_animation();
+                    }
+                    Mode::SmartJump | Mode::Jump => {
+                        self.trigger_quick_switcher_animation();
+                    }
+                    Mode::ContextMenu => {
+                        self.trigger_context_menu_animation();
+                    }
+                    _ => {
+                        self.trigger_dialog_animation();
+                    }
+                }
             } else if self.mode.is_modal() {
                 self.motion.clear_dialog_transition();
+                self.animations
+                    .cancel_tag(crate::animation::AnimationTag::Dialog);
+                self.animations
+                    .cancel_tag(crate::animation::AnimationTag::CommandCenter);
+                self.animations
+                    .cancel_tag(crate::animation::AnimationTag::QuickSwitcher);
+                self.animations
+                    .cancel_tag(crate::animation::AnimationTag::ContextMenu);
             }
         }
         self.mode = mode;
+    }
+
+    /// Triggers a navigation micro-interaction animation (~140ms).
+    pub fn trigger_navigation_animation(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::Navigation,
+        );
+    }
+
+    /// Triggers a selection micro-interaction animation (~100ms).
+    pub fn trigger_selection_animation(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::Selection,
+        );
+    }
+
+    /// Triggers a focus micro-interaction animation (~120ms).
+    pub fn trigger_focus_animation(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::Custom("Focus"),
+        );
+    }
+
+    /// Triggers a preview micro-interaction animation (~120ms).
+    pub fn trigger_preview_animation(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::Custom("Preview"),
+        );
+    }
+
+    /// Triggers a dialog entrance animation (~150ms).
+    pub fn trigger_dialog_animation(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::Dialog,
+        );
+    }
+
+    /// Triggers a Command Center entrance animation (~150ms).
+    pub fn trigger_command_center_animation(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::CommandCenter,
+        );
+    }
+
+    /// Triggers a Quick Switcher entrance animation (~150ms).
+    pub fn trigger_quick_switcher_animation(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::QuickSwitcher,
+        );
+    }
+
+    /// Triggers a Context Menu popover animation (~120ms).
+    pub fn trigger_context_menu_animation(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::ContextMenu,
+        );
+    }
+
+    /// Triggers an operation feedback animation (~160ms).
+    pub fn trigger_operation_animation(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::Operation,
+        );
+    }
+
+    /// Triggers the signature reusable Vision Pulse (~220ms).
+    pub fn trigger_vision_pulse(&mut self) {
+        crate::animation::trigger_micro_animation(
+            &mut self.animations,
+            crate::animation::AnimationTag::VisionPulse,
+        );
     }
 
     /// The motion state tracker.
@@ -4610,6 +4640,43 @@ impl App {
         &mut self.motion
     }
 
+    /// The centralized Animation Engine.
+    pub fn animation_engine(&self) -> &crate::animation::AnimationEngine {
+        &self.animations
+    }
+
+    /// Mutable access to the centralized Animation Engine.
+    pub fn animation_engine_mut(&mut self) -> &mut crate::animation::AnimationEngine {
+        &mut self.animations
+    }
+
+    /// Returns `true` if any animation is currently active.
+    pub fn has_active_animations(&self) -> bool {
+        self.animations.is_animating()
+    }
+
+    /// Sets the complete motion preferences.
+    pub fn set_motion_preferences(&mut self, prefs: crate::animation::MotionPreferences) {
+        self.motion.reduced_motion = prefs.mode != crate::animation::MotionMode::Full;
+        self.animations.set_preferences(prefs);
+    }
+
+    /// Accesses the active motion preferences.
+    pub fn motion_preferences(&self) -> &crate::animation::MotionPreferences {
+        self.animations.preferences()
+    }
+
+    /// Returns the active motion mode.
+    pub fn motion_mode(&self) -> crate::animation::MotionMode {
+        self.animations.preferences().mode
+    }
+
+    /// Sets the motion mode directly.
+    pub fn set_motion_mode(&mut self, mode: crate::animation::MotionMode) {
+        self.motion.reduced_motion = mode != crate::animation::MotionMode::Full;
+        self.animations.set_motion_mode(mode);
+    }
+
     /// Whether reduced motion is active.
     pub fn reduced_motion(&self) -> bool {
         self.motion.reduced_motion
@@ -4618,6 +4685,177 @@ impl App {
     /// Sets the reduced motion preference.
     pub fn set_reduced_motion(&mut self, reduced: bool) {
         self.motion.reduced_motion = reduced;
+        let mode = if reduced {
+            crate::animation::MotionMode::Reduced
+        } else {
+            crate::animation::MotionMode::Full
+        };
+        self.animations.set_motion_mode(mode);
+    }
+
+    /// Begins the signature Vision Boot sequence according to user settings and motion mode.
+    pub fn start_boot(&mut self) {
+        let startup_mode = self.startup_motion_mode();
+        let motion_mode = self.motion_mode();
+
+        if let Some((duration, easing)) =
+            crate::animation::boot_duration_and_easing(startup_mode, motion_mode)
+        {
+            let left_pane = self.pane(self.active_pane);
+            let directory = left_pane.current_path().clone();
+            let entry_count = left_pane.entries().len();
+            let terminal_ready = self.terminal.0.lock().map(|g| g.is_some()).unwrap_or(false);
+            let config_ready = true;
+
+            let (project_name, project_type, project_indicators, project_structure_items) = {
+                let fp = crate::project::detect_project(&directory);
+                if fp.root.is_some() || !fp.project_types.is_empty() {
+                    let p_name = fp.name.clone().unwrap_or_else(|| {
+                        directory
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string()
+                    });
+                    let p_type_str = fp
+                        .project_types
+                        .first()
+                        .map(|t| t.display_name().to_string())
+                        .unwrap_or_else(|| "Project".to_string());
+
+                    let mut indicators = Vec::new();
+                    for t in &fp.project_types {
+                        indicators.push(t.display_name().to_string());
+                    }
+                    for b in &fp.build_systems {
+                        let b_name = b.display_name().to_string();
+                        if !indicators.contains(&b_name) {
+                            indicators.push(b_name);
+                        }
+                    }
+
+                    let mut structure_items = Vec::new();
+                    if !fp.signals.source_dirs.is_empty() || directory.join("src").is_dir() {
+                        structure_items.push(("src/".to_string(), true));
+                    }
+                    if !fp.signals.test_dirs.is_empty() || directory.join("tests").is_dir() {
+                        structure_items.push(("tests/".to_string(), true));
+                    }
+                    if !fp.signals.doc_dirs.is_empty() || directory.join("docs").is_dir() {
+                        structure_items.push(("docs/".to_string(), true));
+                    }
+                    if let Some(manifest) = fp.manifests.first() {
+                        let m_name = manifest
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        structure_items.push((m_name, true));
+                    }
+                    if directory.join("README.md").is_file()
+                        || fp
+                            .signals
+                            .doc_files
+                            .iter()
+                            .any(|f| f.ends_with("README.md") || f.ends_with("README"))
+                    {
+                        structure_items.push(("README.md".to_string(), true));
+                    }
+                    (Some(p_name), Some(p_type_str), indicators, structure_items)
+                } else {
+                    (None, None, Vec::new(), Vec::new())
+                }
+            };
+
+            let git_status = self.git_status();
+            let (git_branch, git_dirty) = if git_status.repository.is_repo() {
+                let b_name = match &git_status.branch {
+                    crate::git::GitBranch::Branch(name) => Some(name.clone()),
+                    crate::git::GitBranch::Detached(sha) => Some(format!("detached@{sha}")),
+                    crate::git::GitBranch::Unknown => Some("HEAD".to_string()),
+                };
+                (b_name, !git_status.is_clean)
+            } else {
+                (None, false)
+            };
+
+            self.boot_state = Some(crate::animation::BootState::new(
+                startup_mode,
+                motion_mode,
+                true,
+                directory,
+                entry_count,
+                terminal_ready,
+                config_ready,
+                project_name,
+                project_type,
+                project_indicators,
+                project_structure_items,
+                git_branch,
+                git_dirty,
+                None,
+            ));
+
+            self.animations
+                .start(crate::animation::AnimationTag::VisionBoot, duration, easing);
+            self.mode = Mode::Boot;
+        } else {
+            self.boot_state = None;
+            if self.mode == Mode::Boot {
+                self.mode = Mode::Normal;
+            }
+        }
+    }
+
+    /// Skips the Vision Boot sequence immediately, returning cleanly to the ready UI.
+    pub fn skip_boot(&mut self) {
+        self.finish_boot();
+    }
+
+    /// Finishes the Vision Boot sequence and restores the normal interaction mode.
+    pub fn finish_boot(&mut self) {
+        self.boot_state = None;
+        self.animations.clear();
+        if self.mode == Mode::Boot {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    /// Whether the application is currently running the Vision Boot startup sequence.
+    pub fn is_booting(&self) -> bool {
+        self.mode == Mode::Boot
+    }
+
+    /// Returns a reference to the active `BootState`, if booting.
+    pub fn boot_state(&self) -> Option<&crate::animation::BootState> {
+        self.boot_state.as_ref()
+    }
+
+    /// Returns normalized boot animation progress (`0.0..=1.0`).
+    pub fn boot_progress(&self) -> f32 {
+        if let Some(prog) = self
+            .animations
+            .tag_progress(crate::animation::AnimationTag::VisionBoot)
+        {
+            prog.eased
+        } else {
+            1.0
+        }
+    }
+
+    /// Returns the active startup motion mode configuration.
+    pub fn startup_motion_mode(&self) -> crate::animation::StartupMotionMode {
+        self.animations.preferences().startup
+    }
+
+    /// Sets the startup motion mode configuration.
+    pub fn set_startup_motion_mode(&mut self, mode: crate::animation::StartupMotionMode) {
+        self.animations.preferences_mut().startup = mode;
+    }
+
+    /// Sets a custom animation engine (primarily for deterministic unit testing).
+    pub fn set_animation_engine(&mut self, engine: crate::animation::AnimationEngine) {
+        self.animations = engine;
     }
 
     /// Whether distraction-free Focus Mode is active.
@@ -4973,15 +5211,57 @@ impl App {
 
         let (context, mut accessible) = {
             let active_pane = self.pane(self.active_pane);
+            let current_path = active_pane.current_path().clone();
             let selected_entry = active_pane.selected_entry();
+            let ws = active_pane.workspace_context();
+            let proj = ws.project_for_path(&current_path);
+            let project_info = active_pane.project_info();
+            let git_status = active_pane.git_status();
+
+            let has_project = ws.is_active() || project_info.root.is_some();
+            let has_source_dir = proj.and_then(|p| p.primary_source_dir()).is_some()
+                || !ws.source_directories().is_empty()
+                || project_info.source_dir.is_some();
+            let has_tests_dir = proj.and_then(|p| p.primary_test_dir()).is_some()
+                || !ws.test_directories().is_empty();
+            let has_docs_dir =
+                proj.and_then(|p| p.primary_doc_dir()).is_some() || !ws.documentation().is_empty();
+            let has_manifest = proj.and_then(|p| p.primary_manifest()).is_some()
+                || project_info.manifest_file.is_some()
+                || ws.important_files().iter().any(|f| f.role.is_manifest());
+            let has_readme = proj.is_some_and(|p| {
+                p.important_files
+                    .iter()
+                    .any(|f| f.role == crate::project::ImportantFileRole::Documentation)
+            }) || ws
+                .important_files()
+                .iter()
+                .any(|f| f.role == crate::project::ImportantFileRole::Documentation)
+                || project_info.readme_file.is_some();
+            let has_license = proj.is_some_and(|p| {
+                p.important_files
+                    .iter()
+                    .any(|f| f.role == crate::project::ImportantFileRole::License)
+            }) || ws
+                .important_files()
+                .iter()
+                .any(|f| f.role == crate::project::ImportantFileRole::License)
+                || project_info.license_file.is_some();
+
             let context = crate::commands::palette::ContextFilter {
                 has_selection: selected_entry.is_some(),
                 selected_is_dir: selected_entry.is_some_and(|e| e.is_dir()),
                 selected_count: active_pane.selected_count(),
                 is_empty_dir: active_pane.entries().is_empty(),
                 is_terminal_focused: false,
-                has_git: active_pane.git().is_repo(),
-                has_project: active_pane.project_info().root.is_some(),
+                has_git: git_status.is_repo(),
+                has_project,
+                has_source_dir,
+                has_tests_dir,
+                has_docs_dir,
+                has_manifest,
+                has_readme,
+                has_license,
                 has_clipboard: self.clipboard.operation.is_some(),
             };
 
@@ -4989,6 +5269,30 @@ impl App {
             for entry in active_pane.entries() {
                 accessible.push(entry.path().to_path_buf());
             }
+
+            if let Some(p) = proj {
+                for imp in &p.important_files {
+                    if !accessible.contains(&imp.path) {
+                        accessible.push(imp.path.clone());
+                    }
+                }
+                for s in &p.source_directories {
+                    if !accessible.contains(&s.path) {
+                        accessible.push(s.path.clone());
+                    }
+                }
+                for t in &p.test_directories {
+                    if !accessible.contains(&t.path) {
+                        accessible.push(t.path.clone());
+                    }
+                }
+                for d in &p.documentation_directories {
+                    if !accessible.contains(&d.path) {
+                        accessible.push(d.path.clone());
+                    }
+                }
+            }
+
             (context, accessible)
         };
 
@@ -5012,7 +5316,81 @@ impl App {
         let mut items = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // 1. Recent Locations (folders)
+        // 1. Project Structure (Project Root, Source, Tests, Docs, Important Files)
+        let ws = self.pane(self.active_pane).workspace_context();
+        let proj = ws.project_for_path(&active_path);
+
+        if let Some(p) = proj {
+            if seen.insert(p.root.clone()) {
+                items.push(SmartJumpItem {
+                    title: format!("Project Root: {}", p.name),
+                    path: p.root.clone(),
+                    category: "PROJECT",
+                    icon: "📦",
+                    is_file: false,
+                });
+            }
+            for s in &p.source_directories {
+                if seen.insert(s.path.clone()) {
+                    items.push(SmartJumpItem {
+                        title: format!("Source: {}", s.name),
+                        path: s.path.clone(),
+                        category: "SOURCE",
+                        icon: "📁",
+                        is_file: false,
+                    });
+                }
+            }
+            for t in &p.test_directories {
+                if seen.insert(t.path.clone()) {
+                    items.push(SmartJumpItem {
+                        title: format!("Tests: {}", t.name),
+                        path: t.path.clone(),
+                        category: "TESTS",
+                        icon: "🧪",
+                        is_file: false,
+                    });
+                }
+            }
+            for d in &p.documentation_directories {
+                if seen.insert(d.path.clone()) {
+                    items.push(SmartJumpItem {
+                        title: format!("Docs: {}", d.name),
+                        path: d.path.clone(),
+                        category: "DOCS",
+                        icon: "📚",
+                        is_file: false,
+                    });
+                }
+            }
+            for imp in &p.important_files {
+                if seen.insert(imp.path.clone()) {
+                    items.push(SmartJumpItem {
+                        title: format!("{}: {}", imp.role.display_name(), imp.name),
+                        path: imp.path.clone(),
+                        category: "IMPORTANT",
+                        icon: "📄",
+                        is_file: true,
+                    });
+                }
+            }
+        } else if let Some(ref proj_root) = self.pane(self.active_pane).project_info().root
+            && seen.insert(proj_root.clone())
+        {
+            let name = proj_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project");
+            items.push(SmartJumpItem {
+                title: format!("Project Root: {name}"),
+                path: proj_root.clone(),
+                category: "PROJECT",
+                icon: "📦",
+                is_file: false,
+            });
+        }
+
+        // 2. Recent Locations (folders)
         for recent in self.recent_locations.locations() {
             if recent.exists() && recent.is_dir() && seen.insert(recent.clone()) {
                 let name = recent
@@ -5029,7 +5407,7 @@ impl App {
             }
         }
 
-        // 2. Recent Files
+        // 3. Recent Files
         for file in self.recent_locations.files() {
             if file.exists() && file.is_file() && seen.insert(file.clone()) {
                 let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("file");
@@ -5043,7 +5421,7 @@ impl App {
             }
         }
 
-        // 3. Current directory
+        // 4. Current directory
         if !active_path.as_os_str().is_empty() && seen.insert(active_path.clone()) {
             let name = active_path
                 .file_name()
@@ -5058,7 +5436,7 @@ impl App {
             });
         }
 
-        // 4. Parent directory
+        // 5. Parent directory
         if let Some(parent) = parent_of(&active_path)
             && seen.insert(parent.clone())
         {
@@ -5071,7 +5449,7 @@ impl App {
             });
         }
 
-        // 5. Git Root (if active)
+        // 6. Git Root (if active)
         if let Some(git_root) = self.pane(self.active_pane).git().root() {
             let git_buf = git_root.to_path_buf();
             if seen.insert(git_buf.clone()) {
@@ -5087,10 +5465,7 @@ impl App {
                     is_file: false,
                 });
             }
-        }
-
-        // 6. Project Root (if active)
-        if let Some(ref proj_root) = self.pane(self.active_pane).project_info().root
+        } else if let Some(ref proj_root) = self.pane(self.active_pane).project_info().root
             && seen.insert(proj_root.clone())
         {
             let name = proj_root
@@ -5267,11 +5642,24 @@ impl App {
     pub fn open_project_cockpit(&mut self) {
         self.mode = Mode::ProjectCockpit;
         let mut actions = Vec::new();
-        let active_pane = self.pane(self.active_pane);
+        let which = self.active_pane;
+        let active_pane = self.pane(which);
+        let active_path = active_pane.current_path().clone();
+        let ws = active_pane.workspace_context();
+        let proj = ws.project_for_path(&active_path);
         let project_info = active_pane.project_info();
         let git_status = active_pane.git_status();
 
-        if let Some(ref root) = project_info.root {
+        // 1. Go to Project Root (if detected)
+        let root_target = if let Some(p) = proj {
+            Some(p.root.clone())
+        } else if let Some(ws_root) = ws.project_root() {
+            Some(ws_root.to_path_buf())
+        } else {
+            project_info.root.clone()
+        };
+
+        if let Some(ref root) = root_target {
             actions.push(ProjectCockpitAction {
                 label: "Go to Project Root",
                 description: format!("Navigate to project root ({})", root.display()),
@@ -5280,16 +5668,26 @@ impl App {
             });
         }
 
-        if let Some(root) = git_status.root() {
+        // 2. Go to Git Root (if git repository)
+        if let Some(git_root) = git_status.root() {
             actions.push(ProjectCockpitAction {
                 label: "Go to Git Root",
-                description: format!("Navigate to Git repository root ({})", root.display()),
-                target_path: Some(root.to_path_buf()),
+                description: format!("Navigate to Git repository root ({})", git_root.display()),
+                target_path: Some(git_root.to_path_buf()),
                 action: Action::GoGitRoot,
             });
         }
 
-        if let Some(ref manifest) = project_info.manifest_file {
+        // 3. Open Manifest (only if manifest exists)
+        let manifest_target = if let Some(p) = proj {
+            p.primary_manifest().map(|m| m.path.clone())
+        } else if let Some(first_imp) = ws.important_files().iter().find(|f| f.role.is_manifest()) {
+            Some(first_imp.path.clone())
+        } else {
+            project_info.manifest_file.clone()
+        };
+
+        if let Some(ref manifest) = manifest_target {
             let name = manifest
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -5302,7 +5700,23 @@ impl App {
             });
         }
 
-        if let Some(ref readme) = project_info.readme_file {
+        // 4. Open README (only if README exists)
+        let readme_target = if let Some(p) = proj {
+            p.important_files
+                .iter()
+                .find(|f| f.role == crate::project::ImportantFileRole::Documentation)
+                .map(|f| f.path.clone())
+        } else if let Some(first_doc) = ws
+            .important_files()
+            .iter()
+            .find(|f| f.role == crate::project::ImportantFileRole::Documentation)
+        {
+            Some(first_doc.path.clone())
+        } else {
+            project_info.readme_file.clone()
+        };
+
+        if let Some(ref readme) = readme_target {
             let name = readme
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -5315,7 +5729,23 @@ impl App {
             });
         }
 
-        if let Some(ref license) = project_info.license_file {
+        // 5. Open LICENSE (only if LICENSE exists)
+        let license_target = if let Some(p) = proj {
+            p.important_files
+                .iter()
+                .find(|f| f.role == crate::project::ImportantFileRole::License)
+                .map(|f| f.path.clone())
+        } else if let Some(first_lic) = ws
+            .important_files()
+            .iter()
+            .find(|f| f.role == crate::project::ImportantFileRole::License)
+        {
+            Some(first_lic.path.clone())
+        } else {
+            project_info.license_file.clone()
+        };
+
+        if let Some(ref license) = license_target {
             let name = license
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -5328,7 +5758,16 @@ impl App {
             });
         }
 
-        if let Some(ref src_dir) = project_info.source_dir {
+        // 6. Go to Source Directory (only if source dir exists)
+        let src_target = if let Some(p) = proj {
+            p.primary_source_dir().map(|p| p.to_path_buf())
+        } else if let Some(first_src) = ws.source_directories().first() {
+            Some(first_src.to_path_buf())
+        } else {
+            project_info.source_dir.clone()
+        };
+
+        if let Some(ref src_dir) = src_target {
             actions.push(ProjectCockpitAction {
                 label: "Go to Source Directory",
                 description: format!(
@@ -5340,6 +5779,44 @@ impl App {
             });
         }
 
+        // 7. Go to Tests Directory (only if test dir exists)
+        let test_target = if let Some(p) = proj {
+            p.primary_test_dir().map(|p| p.to_path_buf())
+        } else {
+            ws.test_directories().first().map(|p| p.to_path_buf())
+        };
+
+        if let Some(ref test_dir) = test_target {
+            actions.push(ProjectCockpitAction {
+                label: "Go to Tests Directory",
+                description: format!(
+                    "Navigate to automated tests directory ({})",
+                    test_dir.display()
+                ),
+                target_path: Some(test_dir.clone()),
+                action: Action::GoTestsDir,
+            });
+        }
+
+        // 8. Go to Documentation Directory (only if docs dir exists)
+        let doc_target = if let Some(p) = proj {
+            p.primary_doc_dir().map(|p| p.to_path_buf())
+        } else {
+            ws.documentation().first().map(|p| p.to_path_buf())
+        };
+
+        if let Some(ref doc_dir) = doc_target {
+            actions.push(ProjectCockpitAction {
+                label: "Go to Documentation",
+                description: format!(
+                    "Navigate to documentation directory ({})",
+                    doc_dir.display()
+                ),
+                target_path: Some(doc_dir.clone()),
+                action: Action::GoDocsDir,
+            });
+        }
+
         actions.push(ProjectCockpitAction {
             label: "Reveal Context",
             description: "Inspect hierarchical file and project context".to_string(),
@@ -5347,12 +5824,14 @@ impl App {
             action: Action::RevealContext,
         });
 
-        actions.push(ProjectCockpitAction {
-            label: "Git Status Panel",
-            description: "Inspect repository status and changed files".to_string(),
-            target_path: None,
-            action: Action::GitStatusPanel,
-        });
+        if git_status.is_repo() {
+            actions.push(ProjectCockpitAction {
+                label: "Git Status Panel",
+                description: "Inspect repository status and changed files".to_string(),
+                target_path: None,
+                action: Action::GitStatusPanel,
+            });
+        }
 
         actions.push(ProjectCockpitAction {
             label: "File Radar",
@@ -5496,17 +5975,42 @@ impl App {
         self.reveal_context.set_levels(levels);
     }
 
+    /// Navigates to the active project root directory.
+    pub fn go_project_root(&mut self) {
+        let which = self.active_pane;
+        let active_path = self.pane(which).current_path().clone();
+        let ws = self.pane(which).workspace_context();
+        let target = if let Some(proj) = ws.project_for_path(&active_path) {
+            Some(proj.root.clone())
+        } else if let Some(ws_root) = ws.project_root() {
+            Some(ws_root.to_path_buf())
+        } else {
+            self.pane(which).project_info().root.clone()
+        };
+
+        if let Some(root) = target {
+            let outcome = self.open_in(which, root);
+            self.report_navigation(outcome);
+            self.refresh_preview();
+        }
+    }
+
     /// Navigates to and selects the project's build manifest file if present.
     pub fn open_manifest(&mut self) {
-        let manifest = self
-            .pane(self.active_pane)
-            .project_info()
-            .manifest_file
-            .clone();
-        if let Some(manifest) = manifest
+        let which = self.active_pane;
+        let active_path = self.pane(which).current_path().clone();
+        let ws = self.pane(which).workspace_context();
+        let target = if let Some(proj) = ws.project_for_path(&active_path) {
+            proj.primary_manifest().map(|m| m.path.clone())
+        } else if let Some(first_imp) = ws.important_files().iter().find(|f| f.role.is_manifest()) {
+            Some(first_imp.path.clone())
+        } else {
+            self.pane(which).project_info().manifest_file.clone()
+        };
+
+        if let Some(manifest) = target
             && let Some(parent) = manifest.parent()
         {
-            let which = self.active_pane;
             let outcome = self.open_in(which, parent.to_path_buf());
             self.report_navigation(outcome);
             self.pane_mut(which).select_path(&manifest);
@@ -5516,15 +6020,27 @@ impl App {
 
     /// Navigates to and selects the project's README file if present.
     pub fn open_readme(&mut self) {
-        let readme = self
-            .pane(self.active_pane)
-            .project_info()
-            .readme_file
-            .clone();
-        if let Some(readme) = readme
+        let which = self.active_pane;
+        let active_path = self.pane(which).current_path().clone();
+        let ws = self.pane(which).workspace_context();
+        let target = if let Some(proj) = ws.project_for_path(&active_path) {
+            proj.important_files
+                .iter()
+                .find(|f| f.role == crate::project::ImportantFileRole::Documentation)
+                .map(|f| f.path.clone())
+        } else if let Some(first_doc) = ws
+            .important_files()
+            .iter()
+            .find(|f| f.role == crate::project::ImportantFileRole::Documentation)
+        {
+            Some(first_doc.path.clone())
+        } else {
+            self.pane(which).project_info().readme_file.clone()
+        };
+
+        if let Some(readme) = target
             && let Some(parent) = readme.parent()
         {
-            let which = self.active_pane;
             let outcome = self.open_in(which, parent.to_path_buf());
             self.report_navigation(outcome);
             self.pane_mut(which).select_path(&readme);
@@ -5534,15 +6050,27 @@ impl App {
 
     /// Navigates to and selects the project's LICENSE file if present.
     pub fn open_license(&mut self) {
-        let license = self
-            .pane(self.active_pane)
-            .project_info()
-            .license_file
-            .clone();
-        if let Some(license) = license
+        let which = self.active_pane;
+        let active_path = self.pane(which).current_path().clone();
+        let ws = self.pane(which).workspace_context();
+        let target = if let Some(proj) = ws.project_for_path(&active_path) {
+            proj.important_files
+                .iter()
+                .find(|f| f.role == crate::project::ImportantFileRole::License)
+                .map(|f| f.path.clone())
+        } else if let Some(first_lic) = ws
+            .important_files()
+            .iter()
+            .find(|f| f.role == crate::project::ImportantFileRole::License)
+        {
+            Some(first_lic.path.clone())
+        } else {
+            self.pane(which).project_info().license_file.clone()
+        };
+
+        if let Some(license) = target
             && let Some(parent) = license.parent()
         {
-            let which = self.active_pane;
             let outcome = self.open_in(which, parent.to_path_buf());
             self.report_navigation(outcome);
             self.pane_mut(which).select_path(&license);
@@ -5552,14 +6080,55 @@ impl App {
 
     /// Navigates directly into the project's primary source directory if detected.
     pub fn go_source_dir(&mut self) {
-        let src_dir = self
-            .pane(self.active_pane)
-            .project_info()
-            .source_dir
-            .clone();
-        if let Some(src_dir) = src_dir {
-            let which = self.active_pane;
+        let which = self.active_pane;
+        let active_path = self.pane(which).current_path().clone();
+        let ws = self.pane(which).workspace_context();
+        let target = if let Some(proj) = ws.project_for_path(&active_path) {
+            proj.primary_source_dir().map(|p| p.to_path_buf())
+        } else if let Some(first_src) = ws.source_directories().first() {
+            Some(first_src.to_path_buf())
+        } else {
+            self.pane(which).project_info().source_dir.clone()
+        };
+
+        if let Some(src_dir) = target {
             let outcome = self.open_in(which, src_dir);
+            self.report_navigation(outcome);
+            self.refresh_preview();
+        }
+    }
+
+    /// Navigates directly into the project's automated test directory if detected.
+    pub fn go_tests_dir(&mut self) {
+        let which = self.active_pane;
+        let active_path = self.pane(which).current_path().clone();
+        let ws = self.pane(which).workspace_context();
+        let target = if let Some(proj) = ws.project_for_path(&active_path) {
+            proj.primary_test_dir().map(|p| p.to_path_buf())
+        } else {
+            ws.test_directories().first().map(|p| p.to_path_buf())
+        };
+
+        if let Some(test_dir) = target {
+            let outcome = self.open_in(which, test_dir);
+            self.report_navigation(outcome);
+            self.refresh_preview();
+        }
+    }
+
+    /// Navigates directly into the project's documentation directory if detected.
+    pub fn go_docs_dir(&mut self) {
+        let which = self.active_pane;
+        let active_path = self.pane(which).current_path().clone();
+        let ws = self.pane(which).workspace_context();
+        let target = if let Some(proj) = ws.project_for_path(&active_path) {
+            proj.primary_doc_dir().map(|p| p.to_path_buf())
+        } else {
+            ws.documentation().first().map(|p| p.to_path_buf())
+        };
+
+        if let Some(doc_dir) = target {
+            let outcome = self.open_in(which, doc_dir);
             self.report_navigation(outcome);
             self.refresh_preview();
         }
@@ -5823,7 +6392,23 @@ impl App {
     pub fn refresh_preview(&mut self) {
         let active_pane = self.pane(self.active_pane);
         if let Some(path) = active_pane.selected_path() {
-            let content = crate::preview::load_preview(&path);
+            let mut content = crate::preview::load_preview(&path);
+            if let crate::preview::PreviewContent::Metadata(ref mut meta) = content {
+                let ws = active_pane.workspace_context();
+                if let Some(proj) = ws.project_for_path(&path) {
+                    let role = ws.directory_role(&path);
+                    let role_str = if role != crate::project::DirectoryRole::Unknown {
+                        format!(" ({})", role.display_name())
+                    } else {
+                        String::new()
+                    };
+                    *meta = meta
+                        .clone()
+                        .with_project_context(Some(format!("{}{role_str}", proj.name)));
+                } else if let Some(ref proj_name) = active_pane.project_info().name {
+                    *meta = meta.clone().with_project_context(Some(proj_name.clone()));
+                }
+            }
             self.preview.set_content(path, content);
         } else {
             self.preview.clear();
@@ -5927,259 +6512,82 @@ impl App {
         &mut self.context_menu
     }
 
+    /// Opens `path` in a new tab in the active pane.
+    pub fn open_path_in_new_tab(&mut self, path: std::path::PathBuf) {
+        if path.as_os_str().is_empty() {
+            self.active_pane_mut().new_tab(path, Vec::new());
+            self.refresh_preview();
+            return;
+        }
+
+        match self.filesystem.list_directory(&path) {
+            Ok(entries) => {
+                self.active_pane_mut().new_tab(path, entries);
+                self.refresh_preview();
+            }
+            Err(err) => {
+                self.report_navigation(Err(NavigationError::Directory(err)));
+            }
+        }
+    }
+
     /// Constructs a context menu tailored to the current selection in the active pane.
     pub fn build_context_menu(&self, position: (u16, u16)) -> ContextMenuState {
         let active = self.active_pane;
-        let paths = self.pane(active).effective_selected_paths();
+        let pane = self.pane(active);
+        let paths = pane.effective_selected_paths();
         let has_clipboard = !self.clipboard.is_empty();
-        let is_mac = crate::input::platform::Platform::current().is_mac();
-        let ctrl_cmd = if is_mac { "⌘" } else { "Ctrl+" };
+        let platform = crate::input::platform::Platform::current();
 
-        let mut items = Vec::new();
-
-        if paths.len() > 1 {
-            // MULTIPLE ITEMS SELECTED
-            items.push(ContextMenuItem::Action {
-                action: Action::Copy,
-                label: "Copy Selected".to_string(),
-                shortcut: Some(format!("{ctrl_cmd}C")),
-            });
-            items.push(ContextMenuItem::Action {
-                action: Action::Cut,
-                label: "Cut Selected".to_string(),
-                shortcut: Some(format!("{ctrl_cmd}X")),
-            });
-            items.push(ContextMenuItem::Action {
-                action: Action::Delete,
-                label: "Delete Selected".to_string(),
-                shortcut: Some("Delete".to_string()),
-            });
-            items.push(ContextMenuItem::Action {
-                action: Action::GetInfo,
-                label: "Get Info".to_string(),
-                shortcut: Some(format!("{ctrl_cmd}I")),
-            });
-            items.push(ContextMenuItem::Separator);
-            items.push(ContextMenuItem::More {
-                label: "More".to_string(),
-                items: vec![
-                    ContextMenuItem::Action {
-                        action: Action::SelectAll,
-                        label: "Select All".to_string(),
-                        shortcut: Some(format!("{ctrl_cmd}A")),
-                    },
-                    ContextMenuItem::Action {
-                        action: Action::DeselectAll,
-                        label: "Deselect All".to_string(),
-                        shortcut: Some("U".to_string()),
-                    },
-                    ContextMenuItem::Action {
-                        action: Action::InvertSelection,
-                        label: "Invert Selection".to_string(),
-                        shortcut: Some("*".to_string()),
-                    },
-                ],
-            });
+        let target = if paths.len() > 1 {
+            ContextMenuTarget::MultiSelection {
+                count: paths.len(),
+                paths: paths.clone(),
+            }
         } else if let Some(path) = paths.first() {
-            let is_dir = self
-                .pane(active)
+            let is_dir = pane
                 .selected_entry()
                 .map(Entry::is_dir)
                 .unwrap_or_else(|| path.is_dir());
             if is_dir {
-                // FOLDER SELECTED
-                items.push(ContextMenuItem::Action {
-                    action: Action::Open,
-                    label: "Open Folder".to_string(),
-                    shortcut: Some("Enter".to_string()),
-                });
-                items.push(ContextMenuItem::Action {
-                    action: Action::Copy,
-                    label: "Copy".to_string(),
-                    shortcut: Some(format!("{ctrl_cmd}C")),
-                });
-                items.push(ContextMenuItem::Action {
-                    action: Action::Cut,
-                    label: "Cut".to_string(),
-                    shortcut: Some(format!("{ctrl_cmd}X")),
-                });
-                if has_clipboard {
-                    items.push(ContextMenuItem::Action {
-                        action: Action::Paste,
-                        label: "Paste".to_string(),
-                        shortcut: Some(format!("{ctrl_cmd}V")),
-                    });
+                let is_project_root = self
+                    .project_info()
+                    .root
+                    .as_ref()
+                    .map(|r| r == path)
+                    .unwrap_or(false);
+                let in_git = self.git_status().repository.is_repo();
+                ContextMenuTarget::Directory {
+                    path: path.clone(),
+                    is_project_root,
+                    in_git,
                 }
-                items.push(ContextMenuItem::Action {
-                    action: Action::Rename,
-                    label: "Rename".to_string(),
-                    shortcut: Some("F2".to_string()),
-                });
-                items.push(ContextMenuItem::Action {
-                    action: Action::Delete,
-                    label: "Delete".to_string(),
-                    shortcut: Some("Delete".to_string()),
-                });
-                items.push(ContextMenuItem::Action {
-                    action: Action::GetInfo,
-                    label: "Get Info".to_string(),
-                    shortcut: Some(format!("{ctrl_cmd}I")),
-                });
-                items.push(ContextMenuItem::Separator);
-                items.push(ContextMenuItem::More {
-                    label: "More".to_string(),
-                    items: vec![
-                        ContextMenuItem::Action {
-                            action: Action::NewFile,
-                            label: "New File".to_string(),
-                            shortcut: Some("N".to_string()),
-                        },
-                        ContextMenuItem::Action {
-                            action: Action::NewDirectory,
-                            label: "New Folder".to_string(),
-                            shortcut: Some(if is_mac {
-                                "⇧⌘N".to_string()
-                            } else {
-                                "Ctrl+Shift+N".to_string()
-                            }),
-                        },
-                        ContextMenuItem::Action {
-                            action: Action::SelectAll,
-                            label: "Select All".to_string(),
-                            shortcut: Some(format!("{ctrl_cmd}A")),
-                        },
-                        ContextMenuItem::Action {
-                            action: Action::ToggleHidden,
-                            label: "Toggle Hidden Files".to_string(),
-                            shortcut: Some(".".to_string()),
-                        },
-                    ],
-                });
             } else {
-                // FILE SELECTED
-                items.push(ContextMenuItem::Action {
-                    action: Action::Open,
-                    label: "Open".to_string(),
-                    shortcut: Some("Enter".to_string()),
-                });
-                items.push(ContextMenuItem::Action {
-                    action: Action::Preview,
-                    label: "Quick Preview".to_string(),
-                    shortcut: Some("Space".to_string()),
-                });
-                items.push(ContextMenuItem::Action {
-                    action: Action::Copy,
-                    label: "Copy".to_string(),
-                    shortcut: Some(format!("{ctrl_cmd}C")),
-                });
-                items.push(ContextMenuItem::Action {
-                    action: Action::Cut,
-                    label: "Cut".to_string(),
-                    shortcut: Some(format!("{ctrl_cmd}X")),
-                });
-                if has_clipboard {
-                    items.push(ContextMenuItem::Action {
-                        action: Action::Paste,
-                        label: "Paste".to_string(),
-                        shortcut: Some(format!("{ctrl_cmd}V")),
-                    });
+                ContextMenuTarget::File {
+                    path: path.clone(),
+                    is_executable: false,
                 }
-                items.push(ContextMenuItem::Action {
-                    action: Action::Rename,
-                    label: "Rename".to_string(),
-                    shortcut: Some("F2".to_string()),
-                });
-                items.push(ContextMenuItem::Action {
-                    action: Action::Delete,
-                    label: "Delete".to_string(),
-                    shortcut: Some("Delete".to_string()),
-                });
-                items.push(ContextMenuItem::Action {
-                    action: Action::GetInfo,
-                    label: "Get Info".to_string(),
-                    shortcut: Some(format!("{ctrl_cmd}I")),
-                });
-                items.push(ContextMenuItem::Separator);
-                items.push(ContextMenuItem::More {
-                    label: "More".to_string(),
-                    items: vec![
-                        ContextMenuItem::Action {
-                            action: Action::SelectAll,
-                            label: "Select All".to_string(),
-                            shortcut: Some(format!("{ctrl_cmd}A")),
-                        },
-                        ContextMenuItem::Action {
-                            action: Action::ToggleHidden,
-                            label: "Toggle Hidden Files".to_string(),
-                            shortcut: Some(".".to_string()),
-                        },
-                    ],
-                });
             }
         } else {
-            // EMPTY DIRECTORY AREA
-            items.push(ContextMenuItem::Action {
-                action: Action::NewDirectory,
-                label: "New Folder".to_string(),
-                shortcut: Some(if is_mac {
-                    "⇧⌘N".to_string()
-                } else {
-                    "Ctrl+Shift+N".to_string()
-                }),
-            });
-            items.push(ContextMenuItem::Action {
-                action: Action::NewFile,
-                label: "New File".to_string(),
-                shortcut: Some("N".to_string()),
-            });
-            if has_clipboard {
-                items.push(ContextMenuItem::Action {
-                    action: Action::Paste,
-                    label: "Paste".to_string(),
-                    shortcut: Some(format!("{ctrl_cmd}V")),
-                });
-            } else {
-                items.push(ContextMenuItem::Disabled {
-                    label: "Paste".to_string(),
-                    reason: Some("Clipboard empty".to_string()),
-                });
+            ContextMenuTarget::Empty {
+                directory: pane.current_path().clone(),
             }
-            items.push(ContextMenuItem::Action {
-                action: Action::RefreshDirectory,
-                label: "Refresh".to_string(),
-                shortcut: Some(format!("{ctrl_cmd}R")),
-            });
-            items.push(ContextMenuItem::Separator);
-            items.push(ContextMenuItem::More {
-                label: "More".to_string(),
-                items: vec![
-                    ContextMenuItem::Action {
-                        action: Action::SelectAll,
-                        label: "Select All".to_string(),
-                        shortcut: Some(format!("{ctrl_cmd}A")),
-                    },
-                    ContextMenuItem::Action {
-                        action: Action::ToggleHidden,
-                        label: "Toggle Hidden Files".to_string(),
-                        shortcut: Some(".".to_string()),
-                    },
-                ],
-            });
-        }
+        };
 
-        ContextMenuState::new(items, position)
+        let items = build_context_menu_items(&target, has_clipboard, platform);
+        ContextMenuState::new(Some(target), items, position)
     }
 
     /// Opens the context menu at `position`.
     pub fn open_context_menu(&mut self, position: (u16, u16)) {
         self.context_menu = self.build_context_menu(position);
-        self.mode = Mode::ContextMenu;
+        self.set_mode(Mode::ContextMenu);
     }
 
     /// Closes the context menu and returns to normal mode.
     pub fn close_context_menu(&mut self) {
         if self.mode == Mode::ContextMenu {
-            self.mode = Mode::Normal;
+            self.set_mode(Mode::Normal);
         }
         self.context_menu.is_more_open = false;
         self.context_menu.items.clear();
@@ -6218,6 +6626,11 @@ impl App {
     /// The project awareness info of the active pane.
     pub fn project_info(&self) -> &ProjectInfo {
         self.pane(self.active_pane).project_info()
+    }
+
+    /// The workspace structure and project graph context of the active pane.
+    pub fn workspace_context(&self) -> &WorkspaceContext {
+        self.pane(self.active_pane).workspace_context()
     }
 
     /// The user's settings mutably.
@@ -6261,6 +6674,8 @@ impl App {
 
         let recent_locations = self.recent_locations.locations().to_vec();
         let recent_files = self.recent_locations.files().to_vec();
+        let motion_mode = self.animations.preferences().mode;
+        let startup_motion = self.animations.preferences().startup;
         let reduced_motion = self.reduced_motion();
         let theme = self.active_theme.id_str().to_string();
 
@@ -6271,6 +6686,8 @@ impl App {
             bookmarks,
             recent_locations,
             recent_files,
+            motion_mode,
+            startup_motion,
             reduced_motion,
             theme,
         }
@@ -6278,8 +6695,14 @@ impl App {
 
     /// Applies loaded settings into application state, validating filesystem paths non-destructively.
     pub fn apply_persistent_settings(&mut self, settings: &Settings) {
-        // 0. Reduced motion
-        self.set_reduced_motion(settings.reduced_motion);
+        // 0. Motion preferences
+        let mut prefs = *self.animations.preferences();
+        prefs.mode = settings.motion_mode;
+        prefs.startup = settings.startup_motion;
+        if settings.reduced_motion && prefs.mode == crate::animation::MotionMode::Full {
+            prefs.mode = crate::animation::MotionMode::Reduced;
+        }
+        self.set_motion_preferences(prefs);
 
         // Theme
         self.active_theme = ThemeRegistry::resolve_id(&settings.theme);
@@ -12757,6 +13180,8 @@ mod tests {
             ],
             recent_locations: Vec::new(),
             recent_files: Vec::new(),
+            motion_mode: crate::animation::MotionMode::Full,
+            startup_motion: crate::animation::StartupMotionMode::Cinematic,
             reduced_motion: false,
             theme: "terminalvision".to_string(),
         };

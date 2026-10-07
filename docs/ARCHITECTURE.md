@@ -380,4 +380,334 @@ The engine includes 10 built-in themes spanning signature, modern dark, retro, a
   - `Action::ThemeSelector`: Opens interactive Theme Selector modal (registered in Command Center, menu, and keybindings).
   - `Action::NextTheme` / `Action::PrevTheme`: Quick theme cycling actions.
 
+---
+
+## Project Intelligence Engine (Phase 1.1)
+
+The Project Intelligence Engine (`src/project/`) transitions TerminalVision from treating directories as anonymous file folders to recognizing and fingerprinting workspace boundaries, project ecosystems, and development topologies.
+
+```
+Filesystem -> Project Intelligence (Detector + Signals) -> ProjectFingerprint -> Application State
+```
+
+### 1. Architectural Principles & Guarantees
+- **Read-Only Safety**: The engine NEVER creates, writes, mutates, or deletes any files, directories, or Git repositories. It never executes builds, invokes package managers, or spawns subprocesses.
+- **Bounded Latency & Performance**: Unbounded recursive scans are strictly forbidden. The engine inspects only the root folder (capped at 128 shallow entries) and queries immediate existence for standard directories (`src/`, `tests/`, `docs/`, `config/`, `.github/`, etc.).
+- **Deterministic Root Resolution**: Starts from any arbitrary file or directory path and walks safely upward (capped at 32 hops) to find the nearest primary manifest (`Cargo.toml`, `package.json`, `go.mod`, `pom.xml`, etc.), secondary manifest (`Makefile`, `requirements.txt`), Git boundary (`.git`), or generic documentation marker (`README.md`, `LICENSE`).
+- **Cross-Platform**: Operates identically on macOS, Linux, and Windows using normalized path abstractions, safely handling filesystem roots (`/`, `C:\`), symlinks, missing paths, and permission restrictions.
+
+### 2. Supported Project Types, Languages & Build Systems
+- **Project Types**: `Rust`, `Node`, `JavaScript`, `TypeScript`, `Python`, `Java`, `Go`, `C`, `Cpp`, `Php`, `Ruby`, `DotNet`, `GenericGit`, `GenericWorkspace`, `Generic`.
+- **Languages**: `Rust`, `JavaScript`, `TypeScript`, `Python`, `Java`, `Kotlin`, `Go`, `C`, `Cpp`, `Php`, `Ruby`, `CSharp`, `Html`, `Css`, `Shell`, `Generic`.
+- **Build Systems**: `Cargo`, `npm`, `Yarn`, `pnpm`, `Bun`, `pip`, `Poetry`, `Pipenv`, `Maven`, `Gradle`, `Go Modules`, `CMake`, `Make`, `Composer`, `Bundler`, `.NET CLI`, `Generic`.
+
+### 3. Rich Signal Taxonomy (`ProjectSignals`)
+The shallow inspector records structured signals without traversing heavy directory trees:
+- **Source Signals**: `src/`, `app/`, `lib/`, `packages/`, `crates/`, `cmd/`, `pkg/`, `internal/`, `include/`, `sources/`.
+- **Test Signals**: `tests/`, `test/`, `__tests__/`, `spec/`, `testing/`.
+- **Documentation Signals**: `README.md`, `README`, `README.rst`, `docs/`, `doc/`, `LICENSE`, `CHANGELOG.md`, `CONTRIBUTING.md`.
+- **Configuration Signals**: `.env`, `.env.example`, `.editorconfig`, `.gitignore`, `tsconfig.json`, `pnpm-workspace.yaml`, `lerna.json`, `turbo.json`, `go.work`.
+- **CI/CD Signals**: `.github/`, `.gitlab-ci.yml`, `Jenkinsfile`, `.circleci/`, `.travis.yml`, `azure-pipelines.yml`.
+- **Container Signals**: `Dockerfile`, `docker-compose.yml`, `compose.yml`, `Containerfile`, `.dockerignore`.
+- **Build / Cache Indicators**: `target/`, `node_modules/`, `dist/`, `build/`, `out/`, `.next/`, `bin/`, `obj/`, `vendor/`.
+
+### 4. Project Fingerprint Representation (`ProjectFingerprint`)
+A structured, immutable domain model containing:
+- `root: Option<PathBuf>`
+- `name: Option<String>`
+- `project_types: Vec<ProjectType>`
+- `languages: Vec<Language>`
+- `build_systems: Vec<BuildSystem>`
+- `manifests: Vec<PathBuf>`
+- `signals: ProjectSignals`
+- `is_git: bool`, `git_root: Option<PathBuf>`, `is_git_worktree: bool`
+- `confidence: DetectionConfidence` (`None`, `Low`, `Medium`, `High`, `Definitive`)
+- `parent_workspace: Option<PathBuf>` & `subprojects: Vec<PathBuf>` & `is_workspace: bool`
+
+### 5. In-Memory Cache & Invalidation Lifecycle (`ProjectCache`, `SharedProjectCache`)
+- **Normalized Keys**: Canonicalized path indexing prevents duplicate detection overhead across relative/symlinked paths.
+- **TTL Expiration**: Configurable TTL (default 5 seconds) ensures project fingerprints remain fresh without stale state persisting indefinitely.
+- **Capacity Bounds**: Maximum entry cap (default 256) prevents memory accumulation.
+- **Granular Invalidation**: Supports `invalidate(path)`, `invalidate_root(root)`, and `clear()`.
+
+### 6. Monorepo & Multi-Project Preparation
+The architecture distinguishes between standalone projects, nested packages, and root workspaces (such as Cargo workspaces, pnpm workspaces, Turborepo, Lerna, and Go workspaces), preparing the foundation for future project-aware features.
+
+---
+
+## Workspace Structure & Project Graph (Phase 1.2)
+
+Phase 1.2 upgrades Project Intelligence from recognizing a project's identity to understanding the structural topology and internal graph of the entire workspace.
+
+```
+Workspace Root / Path -> WorkspaceAnalyzer -> WorkspaceContext -> [ ProjectNode Tree + Classified Directories + Important Files ]
+```
+
+### 1. Structural Graph Models
+- **`WorkspaceContext` (`src/project/workspace.rs`)**:
+  - `root: Option<PathBuf>`
+  - `name: Option<String>`
+  - `is_monorepo: bool`
+  - `primary_project: Option<ProjectNode>`
+  - `projects: Vec<ProjectNode>`
+  - `directories: Vec<ClassifiedDirectory>`
+  - `important_files: Vec<ImportantFile>`
+  - `signals: ProjectSignals`
+- **`ProjectNode` (`src/project/workspace.rs`)**:
+  - `id: String`, `name: String`, `root: PathBuf`
+  - `project_type: ProjectType`, `languages: Vec<Language>`
+  - Partitioned structural segments: `manifests`, `source_directories`, `test_directories`, `documentation_directories`, `configuration_directories`, `build_output`, `generated_output`, `dependencies`, `important_files`.
+  - `parent_workspace: Option<PathBuf>`, `is_root_project: bool`.
+
+### 2. Directory Role Classification (`DirectoryRole`)
+- **Source**: `src/`, `app/`, `lib/`, `packages/`, `components/`, `crates/`, `cmd/`, `pkg/`, `internal/`, `include/`, `sources/`.
+- **Tests**: `tests/`, `test/`, `__tests__/`, `spec/`, `testing/`.
+- **Documentation**: `docs/`, `doc/`, `documentation/`.
+- **Configuration**: `config/`, `.config/`, `.vscode/`, `.idea/`, `.settings/`.
+- **BuildOutput**: `target/`, `dist/`, `build/`, `out/`, `bin/`, `obj/`.
+- **Generated**: `.next/`, `.nuxt/`, `.turbo/`, `generated/`.
+- **Cache**: `.cache/`, `.pytest_cache/`, `.mypy_cache/`, `.cargo-cache/`.
+- **Dependencies**: `node_modules/`, `vendor/`, `third_party/`.
+- **CI**: `.github/`, `.gitlab/`, `.circleci/`, `.buildkite/`.
+- **Tooling**: `scripts/`, `tools/`, `.husky/`.
+- **Assets**: `assets/`, `static/`, `public/`, `media/`, `templates/`.
+
+### 3. Important File Classification (`ImportantFileRole`, `ImportantFile`)
+- **Manifest**: `Cargo.toml`, `package.json`, `pyproject.toml`, `requirements.txt`, `go.mod`, `pom.xml`, `build.gradle`, `CMakeLists.txt`, `composer.json`, `Gemfile`, `*.csproj`, `pnpm-workspace.yaml`, `lerna.json`, `turbo.json`, `go.work`.
+- **Documentation**: `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `ARCHITECTURE.md`.
+- **License**: `LICENSE`, `LICENSE.md`, `COPYING`.
+- **Configuration**: `tsconfig.json`, `jsconfig.json`, `.editorconfig`, `.gitignore`, `.env`, `.env.example`.
+- **Build**: `Makefile`, `CMakeLists.txt`, `build.rs`.
+- **CI**: `.gitlab-ci.yml`, `Jenkinsfile`, `.travis.yml`, `azure-pipelines.yml`.
+- **Container**: `Dockerfile`, `docker-compose.yml`, `compose.yml`, `Containerfile`.
+- **EntryPoint**: `main.rs`, `index.ts`, `index.js`, `main.py`, `app.py`, `main.go`, `App.java`.
+
+### 4. Scan Boundaries, Symlink Protection & Performance
+- **Bounded Shallow Inspection**: Only inspects shallow immediate directory entries (capped at 128 entries per directory level, max 32 subprojects discovered).
+- **Hard Scan Boundaries**: Recursive scanning into `node_modules/`, `target/`, `.git/`, `dist/`, `build/`, `.cache/`, `vendor/` is strictly avoided.
+- **Symlink Cycle Protection**: Visited canonical filesystem paths are tracked via `HashSet<PathBuf>`, preventing infinite loops in circular symlinks (`A -> B -> A`).
+- **Non-Fatal Permissions**: Inaccessible directories degrade safely with zero panics.
+- **Cache Integration**: `ProjectCache` and `SharedProjectCache` cache both `ProjectFingerprint` and `WorkspaceContext` by normalized path with automatic TTL and root invalidation.
+
+---
+
+## 18.3 Project-Aware UI & Command Center Integration (Phase 1.3)
+
+Phase 1.3 connects Project Intelligence and Workspace Intelligence directly to TerminalVision's user interface, Command Center, Quick Switcher, Breadcrumbs, Preview, and Action Registry.
+
+```
+Filesystem (Detection & Bounded Scan)
+    ↓
+Project Intelligence Engine (ProjectFingerprint & WorkspaceContext)
+    ↓
+Application State (PaneState / TabState / App)
+    ↓
+UI Presentation:
+    ├── Signature Header (Subtle Project & Monorepo identity)
+    ├── Interactive Breadcrumb (Visually highlighted Project Root with click navigation)
+    ├── Command Center (Context-aware project actions & fuzzy match boosts)
+    ├── Quick Switcher (Project structure & classified files priority)
+    ├── Project Overview Dialog (Compact, responsive, terminal-native modal)
+    ├── Metadata Preview (Project & Directory Role context tags)
+    └── Universal Action Registry (Fully registered keyboard & mouse accessible actions)
+```
+
+### 1. Authoritative Application State Flow
+- **Single Source of Truth**: All UI components receive `WorkspaceContext` and `ProjectFingerprint` through `PaneState` / `App`. No UI component performs independent filesystem scanning.
+- **Dynamic Context Refresh**: As the user navigates between projects, into nested projects, or into non-project folders (e.g., `~/Downloads`), the authoritative project context automatically updates and synchronizes with preview and action filtering.
+- **Graceful Fallback**: Non-project folders display clean paths without synthetic `"Project: Unknown"` or `"Project: None"` text.
+
+### 2. Signature Header Project Context
+- **Subtle Branding**: Embeds compact, semantic project indicators into the right-aligned status section of the header.
+  - Examples: `Rust · Git · main*`, `TypeScript · main`, `[ws: Monorepo · frontend]`.
+- **Responsive Degradation**: When terminal width is constrained, secondary metadata cleanly collapses to compact forms (`[proj: name]`) or gracefully hides before clipping navigation breadcrumbs.
+
+### 3. Command Center & Universal Action Registry Integration
+- **Context-Aware Dynamic Filtering**: The Command Center (`Ctrl/Cmd+K`) dynamically inspects `ContextFilter` to surface only actions that exist:
+  - `Action::GoProjectRoot` (when inside a project)
+  - `Action::ProjectCockpit` (Project Overview modal)
+  - `Action::GoSourceDir` (only when source directory exists)
+  - `Action::GoTestsDir` (only when tests directory exists)
+  - `Action::GoDocsDir` (only when documentation directory exists)
+  - `Action::OpenManifest` (only when manifest exists)
+  - `Action::OpenReadme` (only when README exists)
+  - `Action::OpenLicense` (only when LICENSE exists)
+- **Fuzzy Search Boosts**: Keywords such as `"source"`, `"tests"`, `"docs"`, `"manifest"`, `"readme"`, `"overview"`, and `"root"` boost project actions to the top of palette searches.
+
+### 4. Quick Switcher (`Ctrl/Cmd+P`) Project Structure Surface
+- Surfaces structured workspace navigation targets with distinct category badges:
+  - `PROJECT`: Project root directory
+  - `SOURCE`: Primary source directories (`src/`, `lib/`, etc.)
+  - `TESTS`: Test suites (`tests/`, `spec/`, etc.)
+  - `DOCS`: Documentation directories (`docs/`, etc.)
+  - `IMPORTANT`: Key project files (`Cargo.toml`, `README.md`, `LICENSE`, etc.)
+  - `RECENT` / `CURRENT` / `PARENT` / `GIT ROOT`: Preserved recent locations and contextual paths.
+
+### 5. Compact Project Overview Modal
+- **Terminal-Native & Responsive**: Accessible via `Action::ProjectCockpit` (Command Center or shortcut), rendering project identity, workspace context, languages, git status, and immediate navigation actions.
+- **Input Handling**: Full keyboard (Arrows, Enter, Esc) and mouse click support with bounding hit testing.
+
+### 6. Breadcrumb & Preview Integration
+- **Interactive Breadcrumb**: Highlights the project root segment in the path hierarchy; clicking the root segment immediately navigates to the project root.
+- **Metadata Preview**: When inspecting source files or directories, metadata preview includes associated Project and Directory Role context without performing expensive parsing.
+
+---
+
+## 20. Signature Terminal Motion — Animation Engine & Motion Infrastructure
+
+TerminalVision incorporates a lightweight, deterministic, non-blocking, terminal-native animation engine (`src/animation/`) designed to power rich terminal transitions without compromising responsiveness or performance.
+
+> **Developer Rule**: *"Animations communicate state; they do not replace state."*
+
+### 1. Architectural Model & Responsibilities
+- **Frame-Based Execution**: Runs synchronously within the existing application event loop. No secondary render threads, fake loading sleeps, or busy loops are used.
+- **Event Loop Integration**: 
+  - `main.rs` dynamically queries `app.has_active_animations()`.
+  - When animations are active, polling timeout switches to the targeted frame interval (30–60 FPS, default ~16ms).
+  - When idle (no animations running), polling immediately drops back to the power-saving default (100ms), consuming near-zero CPU.
+- **PTY & Filesystem Isolation**: Animations never block or intercept PTY input/output, filesystem operations, shell execution, or directory scanning.
+- **Deterministic Clocks**: The engine abstracts time through the `AnimationClock` trait:
+  - `RealClock`: Standard monotonic production clock using `std::time::Instant`.
+  - `ManualClock`: Thread-safe controllable clock for sub-millisecond, deterministic, non-flaky test execution without real-time delays.
+
+### 2. Core Abstractions (`src/animation/`)
+- **`AnimationEngine<C>`**: Tracks active, completed, and cancelled animation instances, advances progress via `.tick()`, prunes completed tracks, and coordinates tag-based lookup and cancellation.
+- **`Animation` & `AnimationId`**: Individual animation track containing start time, duration, progress, state, tag, and optional typed payload.
+- **`AnimationTag`**: Semantic tags (e.g., `VisionBoot`, `PanelTransition`, `SelectionTransition`, `ModalTransition`, `VisionPulse`, `Feedback`) allowing targeted lifecycle operations.
+- **`AnimationState`**: Explicit lifecycle states: `Created` → `Running` → `Completed` / `Cancelled`.
+- **`AnimationProgress`**: Strictly clamped and sanitized progress value in `[0.0, 1.0]`. Protects against `NaN`, `Infinity`, underflow, and overflow.
+- **`Easing`**: Monotonically clamped mathematical curves:
+  - `Linear`
+  - `EaseIn` (quadratic)
+  - `EaseOut` (quadratic)
+  - `EaseInOut` (quadratic)
+  - `CubicEaseInOut`
+  - `SmoothStep` (Hermite polynomial)
+- **`Transition<T>`**: Generic start-to-end interpolation over eased progress for types like `f32` and `u16`.
+- **`Geometry` Utilities**: Safe Rect interpolation (`interpolate_rect`), center expansion (`expand_rect_from_center`), directional sliding (`slide_rect_x`, `slide_rect_y`), and bounding-box clamping (`clamp_rect_to_bounds`) guaranteeing non-negative dimensions and zero panic conditions.
+
+### 3. Motion Preferences & Accessibility
+TerminalVision treats animation as progressive enhancement:
+- **`MotionMode`**:
+  - `Full`: Normal durations and full transition effects (target 60 FPS).
+  - `Reduced`: Transitions are compressed to $\le 20\%$ duration or rendered with instantaneous jump transitions (target 30 FPS).
+  - `Off`: Animations are bypassed or completed in 0ms; final state is rendered immediately.
+- **`StartupMotionMode`**: Configuration preparation for startup sequences (`Cinematic`, `Minimal`, `Off`).
+- **Accessible State Parity**: Disabling motion renders the exact same destination state and indicators instantly without missing visual cues or broken focus.
+
+### 4. Cancellation & Resize Safety
+- **Immediate Cancellation**: User input (such as pressing `Esc` or initiating an action) can immediately cancel running animations via `engine.cancel_all()` or `engine.cancel_by_tag()`.
+- **Clean Fallback**: Cancellation leaves the UI in its stable destination state with no lingering overlays or corrupt layouts.
+- **Dynamic Geometry Recalculation**: Animations never persist absolute screen coordinates across frames. All visual bounding boxes are calculated from the current frame's `terminal.size()` or layout Rect, preventing layout tearing or panics during terminal resizing.
+
+### 5. Vision Boot Sequence (`src/animation/boot.rs`, `src/ui/boot.rs`)
+TerminalVision's signature startup experience visually constructs the workspace environment and presents real system readiness:
+- **Phase Sequence**:
+  1. `Wake` (0.00..0.20): Minimal central beacon and subtle horizontal expansion (`●` / `─────●─────`).
+  2. `Identity` (0.20..0.40): Progressive reveal of `TERMINALVISION` identity and signature tagline `SEE · UNDERSTAND · CONTROL`.
+  3. `SystemReadiness` (0.40..0.65): Real-time readiness reporting across Filesystem, Terminal PTY, Configuration, Project, and Git subsystems.
+  4. `ProjectAwareness` (0.65..0.85): Workspace structure card (project identity, language, tools, manifest/readme detection, or workspace item counts).
+  5. `VisionPulse` (0.85..1.00): Progressive construction of live UI layers (header, panes, preview, footer, terminal) overlaid with an accent pulse and ready cursor `$ _`.
+- **Real Initialization Invariant**: The boot sequence never invents fake project types or git branches. If launched in a non-project directory (e.g. `~/Downloads`), it presents `WORKSPACE READY` and entry totals.
+- **Instant Skip**: Pressing any key (`Esc`, `Enter`, `Space`, `q`) or clicking the mouse terminates the boot sequence instantly and restores interactive focus to the file manager.
+- **Startup Motion Modes**:
+  - `Cinematic`: Full ~1.8s startup presentation.
+  - `Minimal`: ~400ms accelerated startup.
+  - `Off` / `Reduced`: Bypassed directly to normal UI (0ms) or compressed to ~350ms with linear presentation.
+- **Terminal Capability & Small Screen Safety**: Terminals under 60 cols or 14 rows automatically degrade to single/double-line compact status without border tearing, text clipping, or coordinate panics.
+
+### 6. Signature Motion & Micro-Interactions (`src/animation/micro.rs`)
+Post-startup interactions across TerminalVision are enriched with purposeful, subtle, non-blocking micro-interactions:
+
+> **Developer Rule**: *"Never add animation merely because animation is possible."*
+
+- **Standard Durations & Curves**:
+  - **Navigation** (`AnimationTag::Navigation`): ~140ms (`Easing::EaseOut`), applied on directory traversal and path jumping.
+  - **Selection** (`AnimationTag::Selection`): ~100ms (`Easing::EaseOut`), applied on keyboard/mouse cursor changes.
+  - **Focus** (`AnimationTag::Custom("Focus")`): ~120ms (`Easing::EaseOut`), applied on active pane / terminal switching.
+  - **Command Center** (`AnimationTag::CommandCenter`): ~150ms (`Easing::EaseOut`), applied on `Ctrl/Cmd+K` palette opening.
+  - **Quick Switcher** (`AnimationTag::QuickSwitcher`): ~150ms (`Easing::EaseOut`), applied on `Ctrl/Cmd+P` switcher opening.
+  - **Modal Dialogs** (`AnimationTag::Dialog`): ~150ms (`Easing::EaseOut`), applied on dialog entrance (Confirm, Input, Rename, Create, Help, Project Cockpit, Git Status, Radar, Reveal, Storage Vision, Theme Selector).
+  - **Context Menu** (`AnimationTag::ContextMenu`): ~120ms (`Easing::EaseOut`), applied on popup context menu invocation.
+  - **Preview** (`AnimationTag::Custom("Preview")`): ~120ms (`Easing::EaseOut`), applied on preview panel content changes.
+  - **Operation Feedback** (`AnimationTag::Operation`): ~160ms (`Easing::EaseOut`), applied during file copy, move, delete, rename progress.
+  - **Vision Pulse** (`AnimationTag::VisionPulse`): ~220ms (`Easing::CubicEaseInOut`), applied upon significant state milestones (project analysis complete, batch operation done, workspace refreshed).
+- **Rapid Input Superseding**:
+  - Animations are strictly non-queuing. Holding `Down`, `Up`, or rapid key sequences instantly replaces and supersedes previous animation tracks with 0 latency.
+- **PTY Terminal Safety**:
+  - Shell keystrokes and raw terminal output streams are never intercepted, delayed, buffered, or modified by animation routines.
+- **Accessibility & Motion Fallbacks**:
+  - When `MotionMode::Reduced` is selected: All transition durations are compressed to $\le 60$ms with `Easing::Linear`, disabling scaling movements.
+  - When `MotionMode::Off` is selected: All transitions execute in 0ms (instant state updates without animation frames).
+  - Every visual state retains non-animated textual and structural equivalents (borders, checkmarks `✓`, error crosses `✕`, warnings `!`).
+
+---
+
+## 21. Interactive Context Menu Foundation (Phase 3.1)
+
+TerminalVision provides a fully native, contextual popup action menu (`src/commands/context_menu.rs`, `src/ui/dialogs.rs`) integrating deeply with the Universal Action Registry.
+
+```
+Target Selection (File / Dir / Multi / Empty)
+    ↓
+ContextMenuTarget & build_context_menu_items()
+    ↓
+ContextMenuItem / ContextMenuGroup
+    ↓
+Action Registry (Action::* Dispatch)
+    ↓
+App::handle_action() Execution
+```
+
+### 1. Architectural Model & Layer Separation
+- **Target Extraction**: `ContextMenuTarget` isolates target context:
+  - `File { path, is_image, is_executable, is_source }`
+  - `Directory { path, is_project_root }`
+  - `Multiple { paths, count, dir_count, file_count }`
+  - `EmptyPane { current_dir }`
+- **Zero Filesystem Logic**: The context menu creates NO duplicate filesystem handlers. Every action item holds an [`Action`] discriminant resolved directly by `App::handle_action()`.
+- **Dynamic Grouping (`ContextMenuGroup`)**: Menus are segmented into standard semantic groups (`Primary`, `ClipboardOperations`, `FilesystemOperations`, `Inspection`, `Advanced`, `Project`).
+
+### 2. Selection & Right-Click Semantics
+- **Unselected Item Click**: Right-clicking an item outside the current selection shifts cursor selection to that single item and targets it.
+- **Selected Item Click**: Right-clicking an item within an active multi-selection preserves the entire multi-selection and displays aggregate bulk actions (e.g. `Copy 7 Items`, `Delete 7 Items`).
+- **Empty Space Click**: Right-clicking empty space targets the directory background (`New File`, `New Directory`, `Paste`, `Refresh`).
+
+### 3. Positioning & Viewport Clamping Algorithm
+- `calculate_context_menu_rect` and `calculate_context_submenu_rect` calculate popups near cursor position:
+  - Right-edge collision: Repositions popup horizontally to the left (`x = x.saturating_sub(width)`).
+  - Bottom-edge collision: Repositions popup vertically upwards (`y = y.saturating_sub(height)`).
+  - Four-boundary bounding: Ensures rectangle never extends beyond terminal bounds or into negative dimensions.
+- **Scroll Windowing**: When menu item counts exceed terminal viewport height, rendering uses a dynamic visible sliding window keeping the highlighted item centered without UI overflow.
+
+### 4. Submenu & Dismissal Model
+- **Submenus (`More ›`)**: Secondary actions (`Copy Path`, `Copy Name`, `Reveal in Terminal`, `Open in New Tab`, `Storage Vision`) nest cleanly in submenus.
+- **Two-Stage Dismissal**:
+  - `Esc` with submenu open -> Closes submenu and focuses parent item.
+  - `Esc` with main menu open -> Closes context menu and restores pane focus.
+  - Left click outside popup bounds dismisses the menu immediately.
+
+### 5. Terminal Focus Safety
+- When the embedded terminal has focus (`Mode::Terminal`), right-clicking within the terminal pane passes through to terminal/PTTY behavior.
+- Context menus never pop over the interactive PTY shell or corrupt terminal standard input.
+
+### 6. Mouse + Keyboard Action Experience (Phase 3.2)
+- **True Parity**: Every action is reachable identically via mouse, keyboard, and `ActionRegistry`.
+- **Keyboard Entry**: `Shift+F10` and dedicated `Menu` key summon the context menu relative to the current active pane and cursor row.
+- **Advanced Navigation**:
+  - `Up` / `Down` with cyclic boundary wrapping.
+  - `Home` / `End` to jump directly to first / last selectable items.
+  - `PageUp` / `PageDown` to jump by 5 items.
+  - `Right` (`→`) or `Enter` on `More ›` to expand submenus; `Left` (`←`) or `Esc` to return to parent menu.
+- **Lightweight Type-to-Select**: Typing characters (e.g. `d`, `del`, `c`) instantly jumps to the matching selectable menu item by prefix; repeated typing of the same single character cycles through all matching items.
+- **Dynamic Shortcut Synchronization**: Menu items dynamically resolve shortcut display strings via `ShortcutRegistry::global().primary_shortcut(action, platform)`.
+- **Disabled Action Non-Interactivity**: Inactive items (`Paste` when clipboard empty) are visually distinct and cannot be selected or activated via mouse or keyboard.
+
+
+
+
+
+
+
+
 

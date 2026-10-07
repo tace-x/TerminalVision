@@ -48,6 +48,14 @@ pub fn map_key_with_platform(key: KeyEvent, mode: Mode, platform: Platform) -> O
         return None;
     }
 
+    // In Mode::Boot, any key interrupts startup and transitions immediately to the ready UI.
+    if mode == Mode::Boot {
+        if is_quit_request_with_platform(key, platform) {
+            return Some(Action::Quit);
+        }
+        return Some(Action::Cancel);
+    }
+
     // In Terminal mode, only global terminal focus toggle is intercepted.
     // All other keys must be passed directly to the interactive PTY shell.
     if mode == Mode::Terminal {
@@ -196,7 +204,12 @@ pub fn map_key_event_with_platform(key: KeyEvent, mode: Mode, platform: Platform
             KeyCode::Down | KeyCode::Char('j') => InputEvent::ModalNavigateDown,
             KeyCode::Right | KeyCode::Char('l') => InputEvent::ModalNavigateRight,
             KeyCode::Left | KeyCode::Char('h') => InputEvent::ModalNavigateLeft,
-            KeyCode::Esc | KeyCode::Char('q') => InputEvent::Action(Action::Cancel),
+            KeyCode::Home => InputEvent::ModalMoveCursorHome,
+            KeyCode::End => InputEvent::ModalMoveCursorEnd,
+            KeyCode::PageUp => InputEvent::ModalPageUp,
+            KeyCode::PageDown => InputEvent::ModalPageDown,
+            KeyCode::Esc => InputEvent::Action(Action::Cancel),
+            KeyCode::Char(c) => InputEvent::ModalChar(c),
             _ => InputEvent::Ignored,
         },
         Mode::Help | Mode::Preview if !has_ctrl_or_alt => match key.code {

@@ -76,7 +76,8 @@ impl PaneTabsConfig {
     }
 }
 
-/// The complete persistent configuration for TerminalVision.
+use crate::animation::{MotionMode, StartupMotionMode};
+
 /// The complete persistent configuration for TerminalVision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -92,6 +93,10 @@ pub struct Settings {
     pub recent_locations: Vec<PathBuf>,
     /// Saved recent file paths.
     pub recent_files: Vec<PathBuf>,
+    /// Motion fidelity mode (full, reduced, off).
+    pub motion_mode: MotionMode,
+    /// Startup sequence motion mode (cinematic, minimal, off).
+    pub startup_motion: StartupMotionMode,
     /// Whether reduced motion is enabled (skips UI transition frames).
     pub reduced_motion: bool,
     /// Active visual theme identifier (e.g. "terminalvision", "cyberpunk", "nord").
@@ -107,6 +112,8 @@ impl Default for Settings {
             bookmarks: Vec::new(),
             recent_locations: Vec::new(),
             recent_files: Vec::new(),
+            motion_mode: MotionMode::Full,
+            startup_motion: StartupMotionMode::Cinematic,
             reduced_motion: false,
             theme: "terminalvision".to_string(),
         }
@@ -125,9 +132,25 @@ impl Settings {
         out.push_str("# TerminalVision Configuration\n");
         out.push_str("version = 1\n\n");
 
+        let effective_motion_mode = if self.reduced_motion && self.motion_mode == MotionMode::Full {
+            MotionMode::Reduced
+        } else {
+            self.motion_mode
+        };
+        let effective_reduced_motion =
+            self.reduced_motion || effective_motion_mode != MotionMode::Full;
+
         out.push_str("[settings]\n");
         out.push_str(&format!("active_pane = {}\n", self.active_pane.as_str()));
-        out.push_str(&format!("reduced_motion = {}\n", self.reduced_motion));
+        out.push_str(&format!("reduced_motion = {}\n", effective_reduced_motion));
+        out.push_str(&format!(
+            "motion_mode = {}\n",
+            effective_motion_mode.as_str()
+        ));
+        out.push_str(&format!(
+            "startup_motion = {}\n",
+            self.startup_motion.as_str()
+        ));
         out.push_str(&format!("theme = {}\n\n", self.theme));
 
         out.push_str("[tabs.left]\n");
@@ -209,7 +232,21 @@ impl Settings {
                     if key == "active_pane" {
                         settings.active_pane = val.parse().unwrap_or(settings.active_pane);
                     } else if key == "reduced_motion" {
-                        settings.reduced_motion = val.parse().unwrap_or(false);
+                        let rm = val.parse().unwrap_or(false);
+                        settings.reduced_motion = rm;
+                        if rm && settings.motion_mode == MotionMode::Full {
+                            settings.motion_mode = MotionMode::Reduced;
+                        }
+                    } else if key == "motion_mode" || key == "motion" {
+                        if let Ok(mode) = val.parse::<MotionMode>() {
+                            settings.motion_mode = mode;
+                            settings.reduced_motion =
+                                mode != MotionMode::Full || settings.reduced_motion;
+                        }
+                    } else if key == "startup_motion" || key == "startup_animation" {
+                        if let Ok(startup) = val.parse::<StartupMotionMode>() {
+                            settings.startup_motion = startup;
+                        }
                     } else if key == "theme" && !val.is_empty() {
                         settings.theme = val.trim_matches('"').trim_matches('\'').to_lowercase();
                     }
@@ -424,6 +461,8 @@ mod tests {
                 PathBuf::from("/Users/alice/downloads"),
             ],
             recent_files: vec![PathBuf::from("/Users/alice/projects/main.rs")],
+            motion_mode: MotionMode::Reduced,
+            startup_motion: StartupMotionMode::Minimal,
             reduced_motion: true,
             theme: "terminalvision".to_string(),
         };
@@ -457,6 +496,8 @@ mod tests {
             ],
             recent_locations: vec![PathBuf::from("/home/user/📁 My Projects/🦀 Rust")],
             recent_files: Vec::new(),
+            motion_mode: MotionMode::Full,
+            startup_motion: StartupMotionMode::Cinematic,
             reduced_motion: false,
             theme: "terminalvision".to_string(),
         };
@@ -483,6 +524,8 @@ mod tests {
             recent_files: vec![PathBuf::from(
                 r"C:\Users\Admin\Documents\Project A\file.txt",
             )],
+            motion_mode: MotionMode::Full,
+            startup_motion: StartupMotionMode::Cinematic,
             reduced_motion: false,
             theme: "terminalvision".to_string(),
         };
@@ -586,6 +629,8 @@ mod tests {
             bookmarks: vec![BookmarkConfig::new("Test", PathBuf::from("/tmp/test_left"))],
             recent_locations: vec![PathBuf::from("/tmp/test_left")],
             recent_files: Vec::new(),
+            motion_mode: MotionMode::Full,
+            startup_motion: StartupMotionMode::Cinematic,
             reduced_motion: false,
             theme: "terminalvision".to_string(),
         };

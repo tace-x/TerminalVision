@@ -42,13 +42,15 @@ pub enum Mode {
     ThemeSelector,
     /// Interacting with the integrated embedded terminal shell.
     Terminal,
+    /// Initial application startup and signature Vision Boot sequence.
+    Boot,
 }
 
 impl Mode {
     /// Maps the current application mode to its corresponding [`crate::app::actions::ActionContext`].
     pub const fn action_context(self) -> crate::app::actions::ActionContext {
         match self {
-            Self::Normal => crate::app::actions::ActionContext::FileManager,
+            Self::Normal | Self::Boot => crate::app::actions::ActionContext::FileManager,
             Self::Terminal => crate::app::actions::ActionContext::Terminal,
             Self::Search => crate::app::actions::ActionContext::Search,
             Self::Preview => crate::app::actions::ActionContext::Preview,
@@ -74,7 +76,7 @@ impl Mode {
     /// Whether this mode represents an overlay or modal dialog.
     pub const fn is_modal(self) -> bool {
         match self {
-            Self::Normal | Self::Search | Self::Terminal => false,
+            Self::Normal | Self::Search | Self::Terminal | Self::Boot => false,
             Self::Rename
             | Self::Create
             | Self::Confirm
@@ -124,7 +126,9 @@ mod tests {
             Mode::RevealContext,
             Mode::ContextMenu,
             Mode::StorageVision,
+            Mode::ThemeSelector,
             Mode::Terminal,
+            Mode::Boot,
         ];
 
         for (index, mode) in modes.iter().enumerate() {

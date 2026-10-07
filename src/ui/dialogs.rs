@@ -40,6 +40,35 @@ pub fn centered_rect(max_width: u16, max_height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+/// Computes an animated centered rectangle for modal dialogs based on active animation progress.
+pub fn animated_dialog_rect(
+    max_width: u16,
+    max_height: u16,
+    area: Rect,
+    app: &App,
+    tag: crate::animation::AnimationTag,
+) -> Rect {
+    let target = centered_rect(max_width, max_height, area);
+    if let Some(progress) = app
+        .animation_engine()
+        .tag_progress(tag)
+        .filter(|p| p.state.is_active() && app.motion_mode() == crate::animation::MotionMode::Full)
+    {
+        let t = 0.88 + (progress.eased * 0.12);
+        let cur_w = ((target.width as f32) * t).round() as u16;
+        let cur_h = ((target.height as f32) * t).round() as u16;
+        let center_x = target.x + target.width / 2;
+        let center_y = target.y + target.height / 2;
+        let x = center_x.saturating_sub(cur_w / 2);
+        let y = center_y.saturating_sub(cur_h / 2);
+        return crate::animation::clamp_rect_to_bounds(
+            Rect::new(x, y, cur_w.max(1), cur_h.max(1)),
+            area,
+        );
+    }
+    target
+}
+
 /// Computes the centered bounding rectangle for the Theme Selector modal.
 pub fn calculate_theme_selector_rect(area: Rect) -> Rect {
     centered_rect(70, 16, area)
@@ -94,7 +123,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Renders a confirmation prompt dialog (e.g. Delete confirmation).
 fn render_confirm_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(54, 10, area);
+    let dialog_area =
+        animated_dialog_rect(54, 10, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -189,7 +219,8 @@ fn render_confirm_dialog(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Renders a text input dialog for creating or renaming entries.
 fn render_input_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(56, 8, area);
+    let dialog_area =
+        animated_dialog_rect(56, 8, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -264,7 +295,13 @@ fn render_input_dialog(frame: &mut Frame, area: Rect, app: &App) {
 /// A compact text input centred over the panes where the user can type any
 /// absolute or relative path and press Enter to navigate directly to it.
 fn render_jump_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(64, 7, area);
+    let dialog_area = animated_dialog_rect(
+        64,
+        7,
+        area,
+        app,
+        crate::animation::AnimationTag::QuickSwitcher,
+    );
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -352,7 +389,13 @@ pub fn calculate_smart_jump_rect(area: Rect) -> Rect {
 
 /// Renders the searchable Command Center overlay.
 fn render_command_palette(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = calculate_command_palette_rect(area);
+    let dialog_area = animated_dialog_rect(
+        66,
+        18,
+        area,
+        app,
+        crate::animation::AnimationTag::CommandCenter,
+    );
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -504,7 +547,8 @@ fn render_command_palette(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Renders the help / keyboard shortcuts reference dialog.
 fn render_help_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(80, 22, area);
+    let dialog_area =
+        animated_dialog_rect(80, 22, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -675,7 +719,8 @@ fn render_help_dialog(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Renders the favorites / quick access list dialog.
 fn render_bookmarks_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(66, 15, area);
+    let dialog_area =
+        animated_dialog_rect(66, 15, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -784,7 +829,8 @@ fn render_bookmarks_dialog(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Renders the Storage Vision directory analysis and heatmap workspace.
 fn render_storage_vision_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(84, 24, area);
+    let dialog_area =
+        animated_dialog_rect(84, 24, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 10 || dialog_area.height < 6 {
         return;
     }
@@ -1052,7 +1098,13 @@ fn render_storage_children_panel(
 
 /// Renders the Quick Switcher popup dialog.
 fn render_smart_jump_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = calculate_smart_jump_rect(area);
+    let dialog_area = animated_dialog_rect(
+        68,
+        18,
+        area,
+        app,
+        crate::animation::AnimationTag::QuickSwitcher,
+    );
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -1193,7 +1245,8 @@ fn render_smart_jump_dialog(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Renders the compact Project Cockpit modal dialog.
 fn render_project_cockpit_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(68, 20, area);
+    let dialog_area =
+        animated_dialog_rect(70, 22, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -1202,11 +1255,14 @@ fn render_project_cockpit_dialog(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, dialog_area);
 
     let active_pane = app.pane(app.active_pane());
+    let current_path = active_pane.current_path();
+    let ws = active_pane.workspace_context();
+    let proj = ws.project_for_path(current_path);
     let project_info = active_pane.project_info();
     let git_status = active_pane.git_status();
 
     let block = Block::default()
-        .title(" ⚡ Project Cockpit ")
+        .title(" ⚡ Project Overview ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1222,7 +1278,7 @@ fn render_project_cockpit_dialog(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Project Info Header
+            Constraint::Length(5), // Project Info Header
             Constraint::Length(1), // Separator
             Constraint::Min(4),    // Actions List
             Constraint::Length(1), // Footer
@@ -1230,36 +1286,118 @@ fn render_project_cockpit_dialog(frame: &mut Frame, area: Rect, app: &App) {
         .split(inner);
 
     // 1. Project Info Header
-    let name_str = project_info.name();
-    let type_str = project_info
-        .primary_type()
-        .map(|t| t.display_name())
-        .unwrap_or("None");
-    let root_str = project_info
-        .root
-        .as_ref()
-        .map(|r| r.display().to_string())
-        .unwrap_or_else(|| "No project root detected".to_string());
+    let name_str = if let Some(p) = proj {
+        p.name.as_str()
+    } else {
+        project_info.name()
+    };
+
+    let type_str = if let Some(p) = proj {
+        if !p.languages.is_empty() {
+            p.languages
+                .iter()
+                .map(|l| l.display_name())
+                .collect::<Vec<_>>()
+                .join(" · ")
+        } else if p.project_type != crate::project::ProjectType::Generic {
+            p.project_type.display_name().to_string()
+        } else {
+            "Generic".to_string()
+        }
+    } else {
+        project_info
+            .primary_type()
+            .map(|t| t.display_name().to_string())
+            .unwrap_or_else(|| "Generic".to_string())
+    };
+
+    let root_str = if let Some(p) = proj {
+        p.root.display().to_string()
+    } else if let Some(ref r) = ws.root {
+        r.display().to_string()
+    } else {
+        project_info
+            .root
+            .as_ref()
+            .map(|r| r.display().to_string())
+            .unwrap_or_else(|| "No project root detected".to_string())
+    };
+
     let git_desc = if git_status.is_repo() {
         let branch = git_status.branch.display();
         let state = if git_status.is_clean {
-            "clean"
+            "clean".to_string()
         } else {
-            "changed"
+            let mut parts = Vec::new();
+            if git_status.added_count > 0 {
+                parts.push(format!("+{}", git_status.added_count));
+            }
+            if git_status.modified_count > 0 {
+                parts.push(format!("~{}", git_status.modified_count));
+            }
+            if git_status.deleted_count > 0 {
+                parts.push(format!("-{}", git_status.deleted_count));
+            }
+            if git_status.untracked_count > 0 {
+                parts.push(format!("?{}", git_status.untracked_count));
+            }
+            if parts.is_empty() {
+                "modified".to_string()
+            } else {
+                parts.join(" ")
+            }
         };
         format!("{branch} • {state}")
     } else {
         "Not a git repo".to_string()
     };
 
-    let manifest_str = project_info
-        .manifest_file
-        .as_ref()
-        .and_then(|m| m.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("None");
+    let manifest_str = if let Some(p) = proj {
+        p.primary_manifest()
+            .map(|m| m.name.as_str())
+            .unwrap_or("None")
+    } else {
+        project_info
+            .manifest_file
+            .as_ref()
+            .and_then(|m| m.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("None")
+    };
 
-    let info_lines = vec![
+    let source_str = if let Some(p) = proj {
+        p.source_directories
+            .first()
+            .map(|s| s.name.as_str())
+            .unwrap_or("None")
+    } else {
+        project_info
+            .source_dir
+            .as_ref()
+            .and_then(|s| s.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("None")
+    };
+
+    let tests_str = if let Some(p) = proj {
+        p.test_directories
+            .first()
+            .map(|t| t.name.as_str())
+            .unwrap_or("None")
+    } else {
+        "None"
+    };
+
+    let docs_str = if let Some(p) = proj {
+        p.documentation_directories
+            .first()
+            .map(|d| d.name.as_str())
+            .unwrap_or("None")
+    } else {
+        "None"
+    };
+
+    let mut info_lines = vec![
         Line::from(vec![
             Span::styled("  Project:  ", theme.dialog_hint),
             Span::styled(name_str, theme.tab_active_focused),
@@ -1285,26 +1423,26 @@ fn render_project_cockpit_dialog(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled("  Manifest: ", theme.dialog_hint),
             Span::styled(manifest_str, theme.palette_shortcut),
-            Span::styled("   README: ", theme.dialog_hint),
-            Span::styled(
-                if project_info.readme_file.is_some() {
-                    "Found"
-                } else {
-                    "None"
-                },
-                theme.palette_unselected,
-            ),
-            Span::styled("   LICENSE: ", theme.dialog_hint),
-            Span::styled(
-                if project_info.license_file.is_some() {
-                    "Found"
-                } else {
-                    "None"
-                },
-                theme.palette_unselected,
-            ),
+            Span::styled("   Source: ", theme.dialog_hint),
+            Span::styled(source_str, theme.palette_unselected),
+            Span::styled("   Tests: ", theme.dialog_hint),
+            Span::styled(tests_str, theme.palette_unselected),
+            Span::styled("   Docs: ", theme.dialog_hint),
+            Span::styled(docs_str, theme.palette_unselected),
         ]),
     ];
+
+    if ws.is_monorepo {
+        info_lines.push(Line::from(vec![
+            Span::styled("  Workspace: ", theme.dialog_hint),
+            Span::styled(ws.name(), theme.tab_active_focused),
+            Span::styled(
+                format!(" ({} projects detected)", ws.projects.len()),
+                theme.palette_description,
+            ),
+        ]));
+    }
+
     frame.render_widget(Paragraph::new(info_lines), chunks[0]);
 
     // 2. Separator
@@ -1371,7 +1509,8 @@ fn render_project_cockpit_dialog(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Renders the Git Status Panel modal dialog.
 fn render_git_status_panel_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(64, 18, area);
+    let dialog_area =
+        animated_dialog_rect(64, 18, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -1509,7 +1648,8 @@ fn render_git_status_panel_dialog(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Renders the File Radar directory insight dialog.
 fn render_file_radar_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(62, 18, area);
+    let dialog_area =
+        animated_dialog_rect(62, 18, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -1614,7 +1754,8 @@ fn render_file_radar_dialog(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Renders the Reveal Context modal dialog showing hierarchical path layers.
 fn render_reveal_context_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = centered_rect(66, 16, area);
+    let dialog_area =
+        animated_dialog_rect(66, 16, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -1778,9 +1919,19 @@ pub fn render_context_menu_dialog(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut lines = Vec::new();
     let inner_width = inner.width as usize;
+    let inner_height = inner.height as usize;
 
-    for (index, item) in menu.items.iter().enumerate() {
-        let is_selected = index == menu.selected;
+    let visible_count = inner_height.max(1);
+    let start_idx = if menu.selected >= visible_count {
+        menu.selected.saturating_sub(visible_count - 1)
+    } else {
+        0
+    };
+    let end_idx = (start_idx + visible_count).min(menu.items.len());
+
+    for (index, item) in menu.items[start_idx..end_idx].iter().enumerate() {
+        let actual_idx = start_idx + index;
+        let is_selected = actual_idx == menu.selected;
         match item {
             ContextMenuItem::Action {
                 label, shortcut, ..
@@ -1832,12 +1983,18 @@ pub fn render_context_menu_dialog(frame: &mut Frame, area: Rect, app: &App) {
                     ]));
                 }
             }
-            ContextMenuItem::Disabled { label, .. } => {
-                let label_disp = truncate_to_width(label, inner_width.saturating_sub(2));
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(label_disp, theme.dialog_hint),
-                ]));
+            ContextMenuItem::Disabled { label, reason } => {
+                let label_disp = truncate_to_width(label, inner_width.saturating_sub(4));
+                let mut spans = vec![Span::raw("  "), Span::styled(label_disp, theme.dialog_hint)];
+                if let Some(r) = reason {
+                    let label_w = display_width(label);
+                    let avail = inner_width.saturating_sub(label_w + 4);
+                    if avail > 6 {
+                        spans.push(Span::raw(" "));
+                        spans.push(Span::styled(format!("({r})"), theme.dialog_hint));
+                    }
+                }
+                lines.push(Line::from(spans));
             }
             ContextMenuItem::Separator => {
                 lines.push(Line::from(vec![Span::styled(
@@ -1855,7 +2012,12 @@ pub fn render_context_menu_dialog(frame: &mut Frame, area: Rect, app: &App) {
         && let Some(ContextMenuItem::More { items, .. }) = menu.items.get(menu.selected)
         && !items.is_empty()
     {
-        let sub_rect = calculate_context_submenu_rect(menu_rect, menu.selected, items.len(), area);
+        let sub_rect = calculate_context_submenu_rect(
+            menu_rect,
+            menu.selected.saturating_sub(start_idx),
+            items.len(),
+            area,
+        );
         frame.render_widget(Clear, sub_rect);
 
         let sub_block = Block::default()
@@ -1870,34 +2032,92 @@ pub fn render_context_menu_dialog(frame: &mut Frame, area: Rect, app: &App) {
 
         let mut sub_lines = Vec::new();
         let sub_inner_w = sub_inner.width as usize;
+        let sub_inner_h = sub_inner.height as usize;
+        let sub_visible = sub_inner_h.max(1);
+        let sub_start = if menu.more_selected >= sub_visible {
+            menu.more_selected.saturating_sub(sub_visible - 1)
+        } else {
+            0
+        };
+        let sub_end = (sub_start + sub_visible).min(items.len());
 
-        for (idx, sub_item) in items.iter().enumerate() {
-            let is_sub_selected = idx == menu.more_selected;
-            if let ContextMenuItem::Action {
-                label, shortcut, ..
-            } = sub_item
-            {
-                let shortcut_str = shortcut.as_deref().unwrap_or("");
-                let shortcut_w = display_width(shortcut_str);
-                let label_max = sub_inner_w.saturating_sub(shortcut_w + 3);
-                let label_disp = truncate_to_width(label, label_max);
-                let label_w = display_width(&label_disp);
-                let padding = sub_inner_w.saturating_sub(label_w + shortcut_w + 2);
+        for (idx, sub_item) in items[sub_start..sub_end].iter().enumerate() {
+            let actual_sub_idx = sub_start + idx;
+            let is_sub_selected = actual_sub_idx == menu.more_selected;
+            match sub_item {
+                ContextMenuItem::Action {
+                    label, shortcut, ..
+                } => {
+                    let shortcut_str = shortcut.as_deref().unwrap_or("");
+                    let shortcut_w = display_width(shortcut_str);
+                    let label_max = sub_inner_w.saturating_sub(shortcut_w + 3);
+                    let label_disp = truncate_to_width(label, label_max);
+                    let label_w = display_width(&label_disp);
+                    let padding = sub_inner_w.saturating_sub(label_w + shortcut_w + 2);
 
-                if is_sub_selected {
-                    sub_lines.push(Line::from(vec![
-                        Span::styled("▶ ", theme.palette_selected),
-                        Span::styled(label_disp, theme.palette_selected),
-                        Span::raw(" ".repeat(padding)),
-                        Span::styled(shortcut_str.to_string(), theme.palette_shortcut),
-                    ]));
-                } else {
-                    sub_lines.push(Line::from(vec![
+                    if is_sub_selected {
+                        sub_lines.push(Line::from(vec![
+                            Span::styled("▶ ", theme.palette_selected),
+                            Span::styled(label_disp, theme.palette_selected),
+                            Span::raw(" ".repeat(padding)),
+                            Span::styled(shortcut_str.to_string(), theme.palette_shortcut),
+                        ]));
+                    } else {
+                        sub_lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(label_disp, theme.palette_unselected),
+                            Span::raw(" ".repeat(padding)),
+                            Span::styled(shortcut_str.to_string(), theme.dialog_hint),
+                        ]));
+                    }
+                }
+                ContextMenuItem::Disabled { label, reason } => {
+                    let mut spans = vec![
                         Span::raw("  "),
-                        Span::styled(label_disp, theme.palette_unselected),
-                        Span::raw(" ".repeat(padding)),
-                        Span::styled(shortcut_str.to_string(), theme.dialog_hint),
-                    ]));
+                        Span::styled(
+                            truncate_to_width(label, sub_inner_w.saturating_sub(4)),
+                            theme.dialog_hint,
+                        ),
+                    ];
+                    if let Some(r) = reason {
+                        let label_w = display_width(label);
+                        let avail = sub_inner_w.saturating_sub(label_w + 4);
+                        if avail > 6 {
+                            spans.push(Span::raw(" "));
+                            spans.push(Span::styled(format!("({r})"), theme.dialog_hint));
+                        }
+                    }
+                    sub_lines.push(Line::from(spans));
+                }
+                ContextMenuItem::Separator => {
+                    sub_lines.push(Line::from(vec![Span::styled(
+                        "─".repeat(sub_inner_w),
+                        theme.footer_separator,
+                    )]));
+                }
+                ContextMenuItem::More { label, .. } => {
+                    let arrow = "›";
+                    let arrow_w = 1;
+                    let label_max = sub_inner_w.saturating_sub(arrow_w + 3);
+                    let label_disp = truncate_to_width(label, label_max);
+                    let label_w = display_width(&label_disp);
+                    let padding = sub_inner_w.saturating_sub(label_w + arrow_w + 2);
+
+                    if is_sub_selected {
+                        sub_lines.push(Line::from(vec![
+                            Span::styled("▶ ", theme.palette_selected),
+                            Span::styled(label_disp, theme.palette_selected),
+                            Span::raw(" ".repeat(padding)),
+                            Span::styled(arrow.to_string(), theme.palette_shortcut),
+                        ]));
+                    } else {
+                        sub_lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(label_disp, theme.palette_unselected),
+                            Span::raw(" ".repeat(padding)),
+                            Span::styled(arrow.to_string(), theme.dialog_hint),
+                        ]));
+                    }
                 }
             }
         }
@@ -2202,7 +2422,8 @@ pub fn render_error_recovery_dialog(
 
 /// Renders the Theme Selector dialog with live preview support.
 pub fn render_theme_selector_dialog(frame: &mut Frame, area: Rect, app: &App) {
-    let dialog_area = calculate_theme_selector_rect(area);
+    let dialog_area =
+        animated_dialog_rect(70, 16, area, app, crate::animation::AnimationTag::Dialog);
     if dialog_area.width < 4 || dialog_area.height < 4 {
         return;
     }
@@ -2537,7 +2758,7 @@ mod tests {
         let text: String = (0..24)
             .flat_map(|y| (0..80).map(move |x| buffer[(x, y)].symbol().to_string()))
             .collect();
-        assert!(text.contains("Project Cockpit"));
+        assert!(text.contains("Project Overview"));
     }
 
     #[test]

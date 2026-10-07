@@ -13,8 +13,10 @@
 
 ## ✨ Features
 
+- 🚀 **VISION BOOT**: Cinematic yet purposeful initialization sequence (Wake → Identity → Readiness → Project Awareness → Interface Construction → Pulse → Ready) with instant `Esc` / click skipping and configurable motion modes (`Full`, `Reduced`, `Off`).
+- 🖱️ **Interactive Context Menu**: Context-aware right-click and `Shift+F10` modal menu with live action execution, keyboard navigation, type-to-select filtering, submenus, and shortcut keybinding badges synchronized with the Universal Action Registry.
 - 🖥️ **Integrated Real Interactive Terminal**: Bottom panel contains a live Unix pseudo-terminal (PTY) running your system shell (`zsh`, `bash`, `fish`, `sh`). Type commands, run `nano`, `vim`, `python`, `top`, or `ssh` with instant focus toggling (`Ctrl+T` or `F12`).
-- 📁 **Dual-Pane File Manager**: Side-by-side directory browsing with independent tabs, active pane indicators, multi-item selection (`Space`, `⌘A`/`Ctrl+A`, `*`), and sort modes (Name, Size, Modified Date, Type).
+- 📁 **Dual-Pane File Manager**: Side-by-side directory browsing with independent tabs, active pane indicators, multi-item selection (`Space`, `Shift+Up`/`Down`, `⌘A`/`Ctrl+A`, `*`), and sort modes (Name, Size, Modified Date, Type).
 - 🧭 **Interactive Smart Breadcrumb**: Top-level directory path with clickable hierarchy segments and intelligent responsive truncation.
 - ⚡ **Command Center & Quick Switcher**: Unified fuzzy search for all application actions (`⌘K`/`Ctrl+K`) and instantaneous file/folder switching (`⌘P`/`Ctrl+P`).
 - 🖼️ **Universal Quick Preview & Image Inspection**: Instant dimension, bit depth, color model, and aspect ratio decoding for **PNG**, **JPEG**, **GIF**, **BMP**, and **WEBP** images with graphics protocol support (Kitty, iTerm2, Sixel) and technical card fallback.
@@ -24,13 +26,13 @@
 - 🎨 **Dynamic Theme Engine**: 10 built-in color themes with live preview, settings persistence, and terminal ANSI palette synchronization.
 - 🔎 **Live & Recursive Search**: Instant case-insensitive filtering (`/`) with multi-mode cycling (`Tab`): Basic, Recursive background walk, Fuzzy matching, and Deep Recursive Fuzzy.
 - 🔄 **Bidirectional Directory Sync**: Synchronize terminal shell working directory to file manager panes (`pwd` ↔ file manager) and file manager navigation to shell (`cd`), with live refresh (`⌘R`/`Ctrl+R` or `F5`).
-- 🧠 **Developer Intelligence**:
+- 🧠 **Project Intelligence & Developer Cockpit**:
   - **Project Cockpit (`P`)**: Detects project roots (Cargo, npm, Python, Go, Java), manifests, README, license, and source trees.
   - **Git Status Panel (`G`)**: Live in-process repo inspection showing modified, added, deleted, renamed, and untracked files.
   - **File Radar (`F`)**: Instant directory breakdown with file/dir/symlink/hidden counts, byte sizing, and extension distribution.
   - **Reveal Context (`C`)**: Hierarchical context inspector (`File` → `Directory` → `Project Root` → `Git Root`).
   - **Favorites (`⌘D`/`Ctrl+D`)**: Fast persistent pinning of key directories with broken-link detection.
-- 🐭 **Full Mouse Support**: Left-click to select rows and tabs, double-click to navigate directories or preview files, right-click context menu, mouse-wheel scrolling, and click-to-focus on the terminal panel.
+- 🐭 **Full Mouse & Keyboard Parity**: Left-click to select rows and tabs, double-click to navigate directories or preview files, right-click context menu, mouse-wheel scrolling, and click-to-focus on the terminal panel.
 - 🔒 **Zero Unintended Execution**: Selecting or opening files in the file manager never executes arbitrary code or scripts. Commands only execute when you explicitly type them into the embedded terminal.
 
 ---
@@ -66,6 +68,57 @@ TerminalVision features a permanent, responsive bottom terminal panel backed by 
 - **Terminal Scrollback**: Bounded scrollback buffer (up to 2,000 lines) with dedicated keyboard and mouse-wheel scrolling (`ScrollTerminalUp` / `ScrollTerminalDown`).
 - **Focus Separation**: Press `Ctrl+T` or `F12` (or click inside the terminal panel) to focus the terminal for direct typing. Press `Ctrl+T` or click on any file pane to return to file manager navigation.
 - **CWD Synchronization**: Terminal `pwd` matches the active pane; changing directories in the file manager or shell keeps both sides synchronized.
+
+---
+
+## 🚀 VISION BOOT Startup & Motion Engine
+
+TerminalVision launches with **VISION BOOT**, a deterministic, purposeful initialization sequence:
+
+1. **Wake**: Terminal detection, ANSI palette negotiation, and alternate screen initialization.
+2. **Identity**: Product brand typography and version confirmation.
+3. **Readiness**: Subsystem verification (filesystem access, PTY allocation, settings store).
+4. **Project Awareness**: Bounded, read-only fingerprinting of the active workspace (Rust, Node, Python, Java, Go, C/C++, Git).
+5. **Interface Construction**: Dual-pane grid, breadcrumbs, status bars, and preview panel layout geometry.
+6. **Vision Pulse**: Subtle accent sweep signaling interactive readiness.
+7. **Ready**: Seamless handoff to active file manager navigation.
+
+### Motion Control:
+- **Instant Skip**: Press `Esc` or click anywhere to bypass the boot sequence immediately.
+- **Motion Modes**:
+  - `Full`: Smooth eased transitions, pulse feedback, and animated micro-interactions.
+  - `Reduced`: Snappy instantaneous transitions with clean highlight indicators.
+  - `Off`: Zero animation frames for pure instant TUI rendering.
+- Toggle motion modes via settings or the Command Center (`⌘K` / `Ctrl+K`).
+
+---
+
+## 🖱️ Interactive Context Menu
+
+The native Context Menu provides complete mouse and keyboard parity:
+
+```
+┌───────────────────────────────────────┐
+│ ⚡ Context Menu (2 items selected)    │
+├───────────────────────────────────────┤
+│ 📋 Copy                     ⌘C / Ctrl+C│
+│ ✂️  Cut                      ⌘X / Ctrl+X│
+│ 🗑️  Delete                     Delete │
+│ 🏷️  Rename                         F2 │
+│ ───────────────────────────────────── │
+│ 📦 Open in Terminal            Ctrl+T │
+│ 🔍 Preview                          v │
+│ 🗂️  Reveal in Project               P │
+│ ▶ More Options                      ▶ │
+└───────────────────────────────────────┘
+```
+
+- **Triggering**: Right-click any file/folder or press `Shift+F10` (or `Menu` key).
+- **Selection Awareness**: Adapts options dynamically for single files, directories, or multi-selected items.
+- **Type-to-Select**: Type characters while the menu is open to instantly jump to matching menu items.
+- **Submenus**: Navigate into submenus with `Right Arrow` / hover, and return with `Left Arrow`.
+- **Dismissal**: Press `Esc` or click outside the menu to dismiss and restore previous focus.
+- **Authoritative Keybindings**: Shortcut labels are automatically formatted from the Universal Action Registry.
 
 ---
 

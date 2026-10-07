@@ -181,6 +181,13 @@ pub fn handle_mouse_event_at(
     tracker: &mut MouseTracker,
     now: Instant,
 ) {
+    if app.mode() == Mode::Boot {
+        if matches!(event.kind, MouseEventKind::Down(_)) {
+            app.skip_boot();
+        }
+        return;
+    }
+
     if app.mode() == Mode::ContextMenu {
         handle_context_menu_mouse(event, app, terminal_area);
         return;
@@ -198,6 +205,11 @@ pub fn handle_mouse_event_at(
 
     if app.mode() == Mode::ThemeSelector {
         handle_theme_selector_mouse(event, app, terminal_area);
+        return;
+    }
+
+    if app.mode() == Mode::ProjectCockpit {
+        handle_project_cockpit_mouse(event, app, terminal_area);
         return;
     }
 
@@ -558,9 +570,55 @@ fn handle_context_menu_mouse(event: MouseEvent, app: &mut App, terminal_area: Re
             }
         }
 
+        MouseEventKind::ScrollUp => {
+            app.context_menu_mut().move_up();
+        }
+
+        MouseEventKind::ScrollDown => {
+            app.context_menu_mut().move_down();
+        }
+
         MouseEventKind::Down(MouseButton::Right) => {
-            // Right-click outside closes menu
-            app.close_context_menu();
+            let layout = ScreenLayout::calculate(terminal_area);
+            let active = app.active_pane();
+            let pane_hit = hit_test_pane(event.column, event.row, terminal_area, active);
+            let term_rect = layout.terminal();
+
+            if let Some((pane, pane_rect)) = pane_hit {
+                if app.mode() == Mode::Terminal {
+                    app.handle_action(Action::FocusFileManager);
+                }
+                app.set_active_pane(pane);
+
+                let scroll_offset = app.pane(pane).scroll_offset();
+                let total_count = app.pane(pane).visible_count();
+
+                if let Some(index) = hit_test_row(
+                    event.column,
+                    event.row,
+                    pane_rect,
+                    scroll_offset,
+                    total_count,
+                ) {
+                    if let Some(path) = app.pane(pane).path_at(index) {
+                        let path_buf = path.to_path_buf();
+                        if !app.pane(pane).selected_paths().contains(&path_buf) {
+                            app.select_entry(pane, index);
+                        }
+                    } else {
+                        app.select_entry(pane, index);
+                    }
+                } else {
+                    app.pane_mut(pane).deselect_all();
+                }
+
+                app.open_context_menu((event.column, event.row));
+            } else if contains(term_rect, event.column, event.row) {
+                app.close_context_menu();
+                app.handle_action(Action::FocusTerminal);
+            } else {
+                app.close_context_menu();
+            }
         }
 
         _ => {}
@@ -713,6 +771,81 @@ fn handle_smart_jump_mouse(event: MouseEvent, app: &mut App, terminal_area: Rect
             let hovered_idx = scroll_offset + rel_row;
             if hovered_idx < app.smart_jump().filtered_items().len() {
                 app.smart_jump_mut().select(hovered_idx);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Handles mouse interactions when the Project Overview / Cockpit dialog is open.
+fn handle_project_cockpit_mouse(event: MouseEvent, app: &mut App, terminal_area: Rect) {
+    let dialog_rect = crate::ui::dialogs::centered_rect(70, 22, terminal_area);
+    if dialog_rect.width < 4 || dialog_rect.height < 4 {
+        return;
+    }
+
+    let inner = dialog_rect.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    if inner.height < 7 || inner.width == 0 {
+        return;
+    }
+
+    let chunks = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Length(5), // Project Info Header
+            ratatui::layout::Constraint::Length(1), // Separator
+            ratatui::layout::Constraint::Min(4),    // Actions List
+            ratatui::layout::Constraint::Length(1), // Footer
+        ])
+        .split(inner);
+
+    let list_rect = chunks[2];
+
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if contains(list_rect, event.column, event.row) {
+                let rel_row = event.row.saturating_sub(list_rect.y) as usize;
+                let selected = app.project_cockpit().selected_index();
+                let list_height = list_rect.height as usize;
+                let scroll_offset = if selected >= list_height {
+                    selected.saturating_sub(list_height - 1)
+                } else {
+                    0
+                };
+                let clicked_idx = scroll_offset + rel_row;
+                if clicked_idx < app.project_cockpit().actions().len() {
+                    app.project_cockpit_mut().select(clicked_idx);
+                    if let Some(action) = app.confirm_modal() {
+                        app.handle_action(action);
+                    }
+                }
+            } else if !contains(dialog_rect, event.column, event.row) {
+                app.close_modal();
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            app.project_cockpit_mut().select_previous();
+        }
+        MouseEventKind::ScrollDown => {
+            app.project_cockpit_mut().select_next();
+        }
+        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
+            if contains(list_rect, event.column, event.row) =>
+        {
+            let rel_row = event.row.saturating_sub(list_rect.y) as usize;
+            let selected = app.project_cockpit().selected_index();
+            let list_height = list_rect.height as usize;
+            let scroll_offset = if selected >= list_height {
+                selected.saturating_sub(list_height - 1)
+            } else {
+                0
+            };
+            let hovered_idx = scroll_offset + rel_row;
+            if hovered_idx < app.project_cockpit().actions().len() {
+                app.project_cockpit_mut().select(hovered_idx);
             }
         }
         _ => {}

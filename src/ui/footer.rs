@@ -36,6 +36,7 @@ pub fn mode_display(mode: Mode) -> &'static str {
         Mode::Terminal => "TERMINAL",
         Mode::StorageVision => "STORAGE VISION",
         Mode::ThemeSelector => "THEME SELECTOR",
+        Mode::Boot => "BOOT",
     }
 }
 

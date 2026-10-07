@@ -80,6 +80,9 @@ fn run() -> io::Result<()> {
 
     let mut mouse_tracker = terminalvision::input::mouse::MouseTracker::new();
 
+    // Start signature Vision Boot sequence if configured
+    app.start_boot();
+
     // Visibly render the initial interface before waiting for input.
     session.draw(&app)?;
 
@@ -89,7 +92,13 @@ fn run() -> io::Result<()> {
             session.draw(&app)?;
         }
 
-        if let Some(event) = next_event(POLL_INTERVAL, app.mode())? {
+        let poll_interval = if app.has_active_animations() {
+            app.motion_preferences().frame_interval()
+        } else {
+            POLL_INTERVAL
+        };
+
+        if let Some(event) = next_event(poll_interval, app.mode())? {
             apply_input_event(&mut app, event, &mut size, &mut mouse_tracker);
             let _ = app.poll_sync_and_filesystem();
             if !app.should_quit() {
@@ -200,6 +209,8 @@ fn apply_input_event(
                 app.palette_push_char(ch);
             } else if app.mode() == terminalvision::app::modes::Mode::SmartJump {
                 app.smart_jump_push_char(ch);
+            } else if app.mode() == terminalvision::app::modes::Mode::ContextMenu {
+                app.context_menu_mut().type_to_select(ch);
             } else {
                 app.input_push_char(ch);
             }
@@ -225,10 +236,28 @@ fn apply_input_event(
             app.input_move_cursor_right();
         }
         InputEvent::ModalMoveCursorHome => {
-            app.input_move_cursor_home();
+            if app.mode() == terminalvision::app::modes::Mode::ContextMenu {
+                app.context_menu_mut().jump_first();
+            } else {
+                app.input_move_cursor_home();
+            }
         }
         InputEvent::ModalMoveCursorEnd => {
-            app.input_move_cursor_end();
+            if app.mode() == terminalvision::app::modes::Mode::ContextMenu {
+                app.context_menu_mut().jump_last();
+            } else {
+                app.input_move_cursor_end();
+            }
+        }
+        InputEvent::ModalPageUp => {
+            if app.mode() == terminalvision::app::modes::Mode::ContextMenu {
+                app.context_menu_mut().page_up();
+            }
+        }
+        InputEvent::ModalPageDown => {
+            if app.mode() == terminalvision::app::modes::Mode::ContextMenu {
+                app.context_menu_mut().page_down();
+            }
         }
         InputEvent::ModalDelete => {
             app.input_delete_char();

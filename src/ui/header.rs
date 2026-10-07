@@ -29,6 +29,106 @@ pub fn command_center_button_text(platform: Platform, max_width: usize) -> Optio
     }
 }
 
+/// Computes the subtle project header context text and clean status flag.
+fn format_project_header_text(app: &App) -> Option<(String, String, bool)> {
+    let active_pane = app.pane(app.active_pane());
+    let current_path = active_pane.current_path();
+    let ws = active_pane.workspace_context();
+    let proj = ws.project_for_path(current_path);
+    let git_status = active_pane.git_status();
+    let project_info = active_pane.project_info();
+
+    if ws.is_active()
+        && let Some(p) = proj
+    {
+        let type_str = if !p.languages.is_empty() {
+            p.languages
+                .iter()
+                .map(|l| l.display_name())
+                .collect::<Vec<_>>()
+                .join(" · ")
+        } else if p.project_type != crate::project::ProjectType::Generic {
+            p.project_type.display_name().to_string()
+        } else {
+            String::new()
+        };
+
+        let type_suffix = if type_str.is_empty() {
+            String::new()
+        } else {
+            format!(" ({type_str})")
+        };
+
+        let is_clean = git_status.is_clean;
+        let git_suffix = if git_status.is_repo() {
+            let branch = git_status.branch.display();
+            if is_clean {
+                format!(" | {branch} | clean")
+            } else {
+                let mut diff_parts = Vec::new();
+                if git_status.added_count > 0 {
+                    diff_parts.push(format!("+{}", git_status.added_count));
+                }
+                if git_status.modified_count > 0 {
+                    diff_parts.push(format!("~{}", git_status.modified_count));
+                }
+                if git_status.deleted_count > 0 {
+                    diff_parts.push(format!("-{}", git_status.deleted_count));
+                }
+                if git_status.renamed_count > 0 {
+                    diff_parts.push(format!("R{}", git_status.renamed_count));
+                }
+                if git_status.untracked_count > 0 {
+                    diff_parts.push(format!("?{}", git_status.untracked_count));
+                }
+                let diff_str = if diff_parts.is_empty() {
+                    "changed".to_string()
+                } else {
+                    diff_parts.join(" ")
+                };
+                format!(" | {branch} | {diff_str}")
+            }
+        } else {
+            String::new()
+        };
+
+        let full = if ws.is_monorepo && p.parent_workspace.is_some() {
+            let ws_name = ws.name();
+            format!("[ws: {ws_name} · {}{type_suffix}{git_suffix}]", p.name)
+        } else {
+            format!("[project: {}{type_suffix}{git_suffix}]", p.name)
+        };
+
+        let compact = if ws.is_monorepo && p.parent_workspace.is_some() {
+            format!("[ws: {} · {}]", ws.name(), p.name)
+        } else {
+            format!("[proj: {}]", p.name)
+        };
+
+        return Some((full, compact, is_clean));
+    }
+
+    if let Some(summary) = project_info.summary_string(git_status) {
+        let compact = project_info
+            .name
+            .as_deref()
+            .map(|n| format!("[proj: {n}]"))
+            .unwrap_or_else(|| summary.clone());
+        return Some((summary, compact, git_status.is_clean));
+    }
+
+    if let Some(summary) = git_status.summary_string() {
+        let compact = git_status
+            .repository
+            .repo_name()
+            .map(|n| format!("[git: {n}]"))
+            .unwrap_or_else(|| summary.clone());
+        return Some((summary, compact, git_status.is_clean));
+    }
+
+    None
+}
+
 /// Returns the `(start_x, end_x, y)` hit testing coordinate range for the Command Center button in the header.
 pub fn command_center_hit_range(area: Rect, platform: Platform) -> Option<(u16, u16, u16)> {
     if area.height == 0 || area.width < 30 {
@@ -51,6 +151,7 @@ pub fn command_center_hit_range(area: Rect, platform: Platform) -> Option<(u16, 
 }
 
 use crate::navigation::SmartBreadcrumb;
+use ratatui::style::Modifier;
 use std::path::PathBuf;
 
 /// Returns the target directory if a breadcrumb segment was clicked in the header.
@@ -73,29 +174,15 @@ pub fn breadcrumb_hit_segment(
     let platform = Platform::current();
     let mut left_width: usize = display_width(" TerminalVision ");
 
-    let project_info = app.project_info();
-    let git_status = app.git_status();
-
-    if let Some(summary) = project_info.summary_string(git_status) {
-        let proj_text = format!("{summary} ");
+    if let Some((full_text, compact_text, _)) = format_project_header_text(app) {
+        let proj_text = format!("{full_text} ");
         let proj_width = display_width(&proj_text);
         if proj_width + 25 <= width {
             left_width += proj_width;
-        } else if let Some(name) = project_info.name.as_deref() {
-            let minimal_text = format!("[proj: {name}] ");
-            if display_width(&minimal_text) + 20 <= width {
-                left_width += display_width(&minimal_text);
-            }
-        }
-    } else if let Some(summary) = git_status.summary_string() {
-        let git_text = format!("{summary} ");
-        let git_width = display_width(&git_text);
-        if git_width + 25 <= width {
-            left_width += git_width;
-        } else if let Some(repo_name) = git_status.repository.repo_name() {
-            let minimal_text = format!("[git: {repo_name}] ");
-            if display_width(&minimal_text) + 20 <= width {
-                left_width += display_width(&minimal_text);
+        } else {
+            let min_text = format!("{compact_text} ");
+            if display_width(&min_text) + 20 <= width {
+                left_width += display_width(&min_text);
             }
         }
     }
@@ -151,7 +238,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let title_span = Span::styled(" TerminalVision ", theme.app_title);
+    let title_style = if app
+        .animation_engine()
+        .has_active_tag(crate::animation::AnimationTag::VisionPulse)
+    {
+        theme.app_title.add_modifier(ratatui::style::Modifier::BOLD)
+    } else {
+        theme.app_title
+    };
+    let title_span = Span::styled(" TerminalVision ", title_style);
     let sep = Span::styled(
         format!(" {} ", theme.symbols.chevron),
         theme.header_separator,
@@ -159,39 +254,21 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut left_spans = vec![title_span];
 
-    let project_info = app.project_info();
-    let git_status = app.git_status();
-
-    if let Some(summary) = project_info.summary_string(git_status) {
-        let proj_text = format!("{summary} ");
+    if let Some((full_text, compact_text, is_clean)) = format_project_header_text(app) {
+        let proj_text = format!("{full_text} ");
         let proj_width = display_width(&proj_text);
+        let style = if is_clean {
+            theme.project_info_clean
+        } else {
+            theme.project_info_dirty
+        };
+
         if proj_width + 25 <= width {
-            let style = if git_status.is_clean {
-                theme.project_info_clean
-            } else {
-                theme.project_info_dirty
-            };
             left_spans.push(Span::styled(proj_text, style));
-        } else if let Some(name) = project_info.name.as_deref() {
-            let minimal_text = format!("[proj: {name}] ");
-            if display_width(&minimal_text) + 20 <= width {
-                left_spans.push(Span::styled(minimal_text, theme.tab_active_focused));
-            }
-        }
-    } else if let Some(summary) = git_status.summary_string() {
-        let git_text = format!("{summary} ");
-        let git_width = display_width(&git_text);
-        if git_width + 25 <= width {
-            let style = if git_status.is_clean {
-                theme.project_info_clean
-            } else {
-                theme.project_info_dirty
-            };
-            left_spans.push(Span::styled(git_text, style));
-        } else if let Some(repo_name) = git_status.repository.repo_name() {
-            let minimal_text = format!("[git: {repo_name}] ");
-            if display_width(&minimal_text) + 20 <= width {
-                left_spans.push(Span::styled(minimal_text, theme.tab_active_focused));
+        } else {
+            let min_text = format!("{compact_text} ");
+            if display_width(&min_text) + 20 <= width {
+                left_spans.push(Span::styled(min_text, theme.tab_active_focused));
             }
         }
     }
@@ -203,7 +280,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     if width > current_left_width + button_width + 6 {
         let remaining = width - current_left_width - button_width - 3;
-        let path = app.pane(app.active_pane()).current_path();
+        let active_pane = app.pane(app.active_pane());
+        let path = active_pane.current_path();
+        let ws = active_pane.workspace_context();
+        let proj_root = ws
+            .project_for_path(path)
+            .map(|p| p.root.as_path())
+            .or_else(|| ws.project_root())
+            .or_else(|| active_pane.project_info().root.as_deref());
+
         let breadcrumb = SmartBreadcrumb::from_path(path);
 
         left_spans.push(sep);
@@ -224,8 +309,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                         theme.header_separator,
                     ));
                 }
+                let is_proj_root = proj_root.is_some_and(|r| r == seg.path);
                 if seg.is_current {
                     left_spans.push(Span::styled(seg.name.clone(), theme.tab_active_focused));
+                } else if is_proj_root {
+                    left_spans.push(Span::styled(
+                        seg.name.clone(),
+                        theme.project_info_clean.add_modifier(Modifier::BOLD),
+                    ));
                 } else {
                     left_spans.push(Span::styled(seg.name.clone(), theme.header_path));
                 }

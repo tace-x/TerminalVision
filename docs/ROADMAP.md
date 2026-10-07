@@ -29,3 +29,16 @@
   - [x] 17.7 Signature UI & Minimal Motion
   - [x] 17.8 Dynamic Theme Engine & Terminal Palette Synchronization
   - [x] 17.9 Final Integration, QA, Stability & Release Polish
+- [x] 18. Project Intelligence Engine
+  - [x] 18.1 Project Intelligence Foundation (Phase 1.1)
+  - [x] 18.2 Workspace Structure & Project Graph (Phase 1.2)
+  - [x] 18.3 Project-Aware UI, Command Center & Quick Switcher Integration (Phase 1.3)
+- [x] 19. Signature Terminal Motion
+  - [x] 19.1 Animation Engine & Motion Infrastructure (Phase 2.1)
+  - [x] 19.2 Vision Boot Sequence (Phase 2.2)
+  - [x] 19.3 Signature Motion & Micro-Interactions (Phase 2.3)
+- [x] 20. Interactive Context Menu Foundation
+  - [x] 20.1 Interactive Context Menu Foundation (Phase 3.1)
+  - [x] 20.2 Mouse + Keyboard Action Experience (Phase 3.2)
+
+

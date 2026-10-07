@@ -308,6 +308,7 @@ impl ShortcutFormatter {
             KeyCode::PageDown => "PgDn",
             KeyCode::Home => "Home",
             KeyCode::End => "End",
+            KeyCode::Menu => "Menu",
             KeyCode::F(n) => return format!("{s}F{n}"),
             KeyCode::Char(' ') => "Space",
             KeyCode::Char(c) => return format!("{s}{}", c.to_ascii_uppercase()),
@@ -351,6 +352,7 @@ impl ShortcutFormatter {
             KeyCode::PageDown => "PgDn",
             KeyCode::Home => "Home",
             KeyCode::End => "End",
+            KeyCode::Menu => "Menu",
             KeyCode::F(n) => {
                 let f_str = format!("F{n}");
                 if parts.is_empty() {
@@ -695,6 +697,11 @@ impl ShortcutRegistry {
         reg.register(ShortcutBinding::primary(
             Action::ContextMenu,
             KeyChord::shift(KeyCode::F(10)),
+            ActionContext::FileManager,
+        ));
+        reg.register(ShortcutBinding::secondary(
+            Action::ContextMenu,
+            KeyChord::plain(KeyCode::Menu),
             ActionContext::FileManager,
         ));
         reg.register(ShortcutBinding::primary(

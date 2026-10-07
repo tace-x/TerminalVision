@@ -10,6 +10,7 @@
 //! The rendering layer is not connected yet. The binary owns the terminal
 //! lifecycle and the application loop, and nothing else.
 
+pub mod animation;
 pub mod app;
 pub mod commands;
 pub mod config;
@@ -20,6 +21,7 @@ pub mod layout;
 pub mod navigation;
 pub mod operations;
 pub mod preview;
+pub mod project;
 pub mod search;
 pub mod storage;
 pub mod terminal;

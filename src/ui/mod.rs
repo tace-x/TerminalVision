@@ -4,6 +4,7 @@
 //! The UI layer only reads prepared application state and never performs
 //! filesystem operations or mutates domain models.
 
+pub mod boot;
 pub mod dialogs;
 pub mod file_list;
 pub mod footer;
@@ -150,6 +151,12 @@ pub fn truncate_path_to_width(path: &Path, max_width: usize) -> String {
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    // If currently running Vision Boot sequence, render the startup experience
+    if let (crate::app::modes::Mode::Boot, Some(boot_state)) = (app.mode(), app.boot_state()) {
+        boot::render(frame, area, app, boot_state, app.boot_progress());
         return;
     }
 

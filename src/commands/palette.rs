@@ -46,6 +46,7 @@ impl Command {
         Command::new_with_action(Action::NextTab),
         Command::new_with_action(Action::PreviousTab),
         Command::new_with_action(Action::DuplicateTab),
+        Command::new_with_action(Action::OpenInNewTab),
         Command::new_with_action(Action::NewFile),
         Command::new_with_action(Action::NewDirectory),
         Command::new_with_action(Action::Rename),
@@ -61,6 +62,8 @@ impl Command {
         Command::new_with_action(Action::InvertSelection),
         Command::new_with_action(Action::ContextMenu),
         Command::new_with_action(Action::GetInfo),
+        Command::new_with_action(Action::CopyPath),
+        Command::new_with_action(Action::CopyName),
         Command::new_with_action(Action::ToggleHidden),
         Command::new_with_action(Action::ChangeSort),
         Command::new_with_action(Action::RefreshDirectory),
@@ -84,6 +87,8 @@ impl Command {
         Command::new_with_action(Action::OpenReadme),
         Command::new_with_action(Action::OpenLicense),
         Command::new_with_action(Action::GoSourceDir),
+        Command::new_with_action(Action::GoTestsDir),
+        Command::new_with_action(Action::GoDocsDir),
         Command::new_with_action(Action::ToggleTerminalFocus),
         Command::new_with_action(Action::FocusTerminal),
         Command::new_with_action(Action::FocusFileManager),
@@ -250,12 +255,37 @@ pub struct ContextFilter {
     pub is_terminal_focused: bool,
     pub has_git: bool,
     pub has_project: bool,
+    pub has_source_dir: bool,
+    pub has_tests_dir: bool,
+    pub has_docs_dir: bool,
+    pub has_manifest: bool,
+    pub has_readme: bool,
+    pub has_license: bool,
     pub has_clipboard: bool,
 }
 
 impl ContextFilter {
+    /// Returns true if `action` can be executed/exposed in the current context.
+    pub fn is_action_available(&self, action: Action) -> bool {
+        match action {
+            Action::GoProjectRoot | Action::ProjectCockpit => self.has_project,
+            Action::GoSourceDir => self.has_source_dir,
+            Action::GoTestsDir => self.has_tests_dir,
+            Action::GoDocsDir => self.has_docs_dir,
+            Action::OpenManifest => self.has_manifest,
+            Action::OpenReadme => self.has_readme,
+            Action::OpenLicense => self.has_license,
+            Action::GoGitRoot | Action::GitStatus | Action::GitStatusPanel => self.has_git,
+            _ => true,
+        }
+    }
+
     /// Returns true if `action` is particularly applicable to the current context.
     pub fn is_action_relevant(&self, action: Action) -> bool {
+        if !self.is_action_available(action) {
+            return false;
+        }
+
         if self.is_terminal_focused {
             return matches!(
                 action,
@@ -291,12 +321,13 @@ impl ContextFilter {
             // Actions relevant when in git
             Action::GitStatus | Action::GitStatusPanel | Action::GoGitRoot => self.has_git,
             // Actions relevant when in project
-            Action::ProjectCockpit
-            | Action::GoProjectRoot
-            | Action::OpenManifest
-            | Action::OpenReadme
-            | Action::OpenLicense
-            | Action::GoSourceDir => self.has_project,
+            Action::ProjectCockpit | Action::GoProjectRoot => self.has_project,
+            Action::GoSourceDir => self.has_source_dir,
+            Action::GoTestsDir => self.has_tests_dir,
+            Action::GoDocsDir => self.has_docs_dir,
+            Action::OpenManifest => self.has_manifest,
+            Action::OpenReadme => self.has_readme,
+            Action::OpenLicense => self.has_license,
             // Always relevant file manager actions
             Action::NewFile
             | Action::NewDirectory
@@ -363,6 +394,34 @@ pub fn filter_commands_with_platform(query: &str, platform: Platform) -> Vec<Com
         } else if cmd.action() == Action::SmartJump {
             extra_targets.push("quick switcher");
             extra_targets.push("jump");
+        } else if cmd.action() == Action::GoProjectRoot {
+            extra_targets.push("project root");
+            extra_targets.push("root");
+        } else if cmd.action() == Action::ProjectCockpit {
+            extra_targets.push("project overview");
+            extra_targets.push("overview");
+            extra_targets.push("cockpit");
+        } else if cmd.action() == Action::GoSourceDir {
+            extra_targets.push("source");
+            extra_targets.push("src");
+            extra_targets.push("code");
+        } else if cmd.action() == Action::GoTestsDir {
+            extra_targets.push("tests");
+            extra_targets.push("test");
+            extra_targets.push("testing");
+        } else if cmd.action() == Action::GoDocsDir {
+            extra_targets.push("docs");
+            extra_targets.push("doc");
+            extra_targets.push("documentation");
+        } else if cmd.action() == Action::OpenManifest {
+            extra_targets.push("manifest");
+            extra_targets.push("cargo.toml");
+            extra_targets.push("package.json");
+        } else if cmd.action() == Action::OpenReadme {
+            extra_targets.push("readme");
+            extra_targets.push("read me");
+        } else if cmd.action() == Action::OpenLicense {
+            extra_targets.push("license");
         }
 
         let mut best = fuzzy_match(trimmed, name).map(|s| s + 400);
@@ -407,6 +466,9 @@ pub fn search_command_center(
         let mut other = Vec::new();
 
         for cmd in Command::all() {
+            if !context.is_action_available(cmd.action()) {
+                continue;
+            }
             if context.is_action_relevant(cmd.action()) {
                 relevant.push(CommandCenterEntry::from_action(cmd.action()));
             } else {
@@ -422,6 +484,10 @@ pub fn search_command_center(
 
     // 1. Match Actions
     for cmd in Command::all() {
+        if !context.is_action_available(cmd.action()) {
+            continue;
+        }
+
         let name = cmd.name();
         let desc = cmd.description();
         let cat = cmd.category().display_name();
@@ -445,6 +511,34 @@ pub fn search_command_center(
         } else if cmd.action() == Action::SmartJump {
             extra_targets.push("quick switcher");
             extra_targets.push("jump");
+        } else if cmd.action() == Action::GoProjectRoot {
+            extra_targets.push("project root");
+            extra_targets.push("root");
+        } else if cmd.action() == Action::ProjectCockpit {
+            extra_targets.push("project overview");
+            extra_targets.push("overview");
+            extra_targets.push("cockpit");
+        } else if cmd.action() == Action::GoSourceDir {
+            extra_targets.push("source");
+            extra_targets.push("src");
+            extra_targets.push("code");
+        } else if cmd.action() == Action::GoTestsDir {
+            extra_targets.push("tests");
+            extra_targets.push("test");
+            extra_targets.push("testing");
+        } else if cmd.action() == Action::GoDocsDir {
+            extra_targets.push("docs");
+            extra_targets.push("doc");
+            extra_targets.push("documentation");
+        } else if cmd.action() == Action::OpenManifest {
+            extra_targets.push("manifest");
+            extra_targets.push("cargo.toml");
+            extra_targets.push("package.json");
+        } else if cmd.action() == Action::OpenReadme {
+            extra_targets.push("readme");
+            extra_targets.push("read me");
+        } else if cmd.action() == Action::OpenLicense {
+            extra_targets.push("license");
         }
 
         let mut best = fuzzy_match(trimmed, name).map(|s| s + 400);

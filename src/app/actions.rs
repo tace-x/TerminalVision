@@ -234,6 +234,10 @@ pub enum Action {
     OpenLicense,
     /// Navigates directly to the project's primary source directory (e.g. src/).
     GoSourceDir,
+    /// Navigates directly to the project's automated test directory (e.g. tests/).
+    GoTestsDir,
+    /// Navigates directly to the project's documentation directory (e.g. docs/).
+    GoDocsDir,
 
     /// Opens the File Radar directory insight view.
     FileRadar,
@@ -266,11 +270,17 @@ pub enum Action {
     ScrollTerminalDown,
     /// Refreshes the directory listing of the active pane.
     RefreshDirectory,
+    /// Copies the full absolute path of the selected item(s) to the clipboard.
+    CopyPath,
+    /// Copies the filename of the selected item(s) to the clipboard.
+    CopyName,
+    /// Opens the selected directory in a new tab in the active pane.
+    OpenInNewTab,
 }
 
 impl Action {
     /// Every action defined by TerminalVision.
-    pub const ALL: [Action; 78] = [
+    pub const ALL: [Action; 83] = [
         Action::MoveUp,
         Action::MoveDown,
         Action::MoveLeft,
@@ -342,6 +352,8 @@ impl Action {
         Action::OpenReadme,
         Action::OpenLicense,
         Action::GoSourceDir,
+        Action::GoTestsDir,
+        Action::GoDocsDir,
         Action::ToggleTerminalFocus,
         Action::FocusTerminal,
         Action::FocusFileManager,
@@ -349,6 +361,9 @@ impl Action {
         Action::SyncDirectoryToTerminal,
         Action::ScrollTerminalUp,
         Action::ScrollTerminalDown,
+        Action::CopyPath,
+        Action::CopyName,
+        Action::OpenInNewTab,
     ];
 
     /// What the action is about.
@@ -380,13 +395,16 @@ impl Action {
             | Action::OpenManifest
             | Action::OpenReadme
             | Action::OpenLicense
-            | Action::GoSourceDir => ActionCategory::Project,
+            | Action::GoSourceDir
+            | Action::GoTestsDir
+            | Action::GoDocsDir => ActionCategory::Project,
 
             Action::NewTab
             | Action::CloseTab
             | Action::NextTab
             | Action::PreviousTab
-            | Action::DuplicateTab => ActionCategory::Tabs,
+            | Action::DuplicateTab
+            | Action::OpenInNewTab => ActionCategory::Tabs,
 
             Action::NewFile
             | Action::NewDirectory
@@ -402,7 +420,9 @@ impl Action {
             | Action::SelectRangeUp
             | Action::SelectRangeDown
             | Action::ContextMenu
-            | Action::GetInfo => ActionCategory::Files,
+            | Action::GetInfo
+            | Action::CopyPath
+            | Action::CopyName => ActionCategory::Files,
 
             Action::ToggleHidden
             | Action::ChangeSort
@@ -672,6 +692,13 @@ impl ActionRegistry {
             ActionCategory::Tabs,
             ActionContext::FileManager,
         ));
+        registry.register(ActionMetadata::new(
+            Action::OpenInNewTab,
+            "Open in New Tab",
+            "Open selected directory in a new tab",
+            ActionCategory::Tabs,
+            ActionContext::FileManager,
+        ));
 
         // Files
         registry.register(ActionMetadata::new(
@@ -776,6 +803,20 @@ impl ActionRegistry {
             Action::GetInfo,
             "Get Info",
             "View file or folder properties and metadata",
+            ActionCategory::Files,
+            ActionContext::FileManager,
+        ));
+        registry.register(ActionMetadata::new(
+            Action::CopyPath,
+            "Copy Path",
+            "Copy full path to clipboard",
+            ActionCategory::Files,
+            ActionContext::FileManager,
+        ));
+        registry.register(ActionMetadata::new(
+            Action::CopyName,
+            "Copy Name",
+            "Copy file or folder name to clipboard",
             ActionCategory::Files,
             ActionContext::FileManager,
         ));
@@ -994,6 +1035,20 @@ impl ActionRegistry {
             ActionCategory::Project,
             ActionContext::FileManager,
         ));
+        registry.register(ActionMetadata::new(
+            Action::GoTestsDir,
+            "Go to Tests Directory",
+            "Navigate to project automated tests directory (tests/, etc.)",
+            ActionCategory::Project,
+            ActionContext::FileManager,
+        ));
+        registry.register(ActionMetadata::new(
+            Action::GoDocsDir,
+            "Go to Documentation",
+            "Navigate to project documentation directory (docs/, etc.)",
+            ActionCategory::Project,
+            ActionContext::FileManager,
+        ));
 
         // Terminal
         registry.register(ActionMetadata::new(
@@ -1137,7 +1192,7 @@ mod tests {
         all_list.sort();
         let unique: HashSet<Action> = Action::ALL.into_iter().collect();
         assert_eq!(unique.len(), Action::ALL.len());
-        assert_eq!(Action::ALL.len(), 78);
+        assert_eq!(Action::ALL.len(), 83);
     }
 
     #[test]

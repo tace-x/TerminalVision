@@ -59,6 +59,10 @@ pub enum InputEvent {
     ModalNavigateLeft,
     /// Navigate right / expand submenu in a modal.
     ModalNavigateRight,
+    /// Navigate page up in a modal list.
+    ModalPageUp,
+    /// Navigate page down in a modal list.
+    ModalPageDown,
     /// Toggle selected option in a confirmation dialog.
     ModalToggle,
     /// Explicitly choose Yes or No in a confirmation dialog.

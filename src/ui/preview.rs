@@ -189,6 +189,16 @@ fn render_metadata_preview(frame: &mut Frame, area: Rect, meta: &MetadataPreview
         is_path: false,
     });
 
+    if let Some(ctx) = meta.project_context() {
+        fields.push(MetadataField {
+            label: "Project",
+            badge: None,
+            value: ctx.to_string(),
+            value_style: theme.tab_active_focused,
+            is_path: false,
+        });
+    }
+
     if let Some(ext) = meta.extension() {
         fields.push(MetadataField {
             label: "Extension",
@@ -451,7 +461,7 @@ fn render_image_preview(frame: &mut Frame, area: Rect, img: &ImagePreview, theme
         for row in 0..frame_h {
             let row_str = if row == frame_h / 2 {
                 let mid_label = format!("  {}  ", dims_str);
-                let pad = frame_w.saturating_sub(mid_label.len()) / 2;
+                let pad = frame_w.saturating_sub(crate::ui::display_width(&mid_label)) / 2;
                 format!("│{:pad$}{mid_label}{:pad$}│", "", "", pad = pad)
             } else {
                 format!("│{:width$}│", "", width = frame_w)
